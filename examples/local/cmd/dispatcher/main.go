@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,6 +22,10 @@ import (
 )
 
 func main() {
+	// Command-line flags
+	multiQueue := flag.Bool("multi-queue", false, "Enable multi-queue routing (route different topics to different queues)")
+	flag.Parse()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
@@ -32,6 +37,7 @@ func main() {
 	dbURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:15432/o4x?sslmode=disable")
 	sqsEndpoint := getEnv("SQS_ENDPOINT", "http://localhost:14566")
 	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events.fifo")
+	standardQueueURL := getEnv("STANDARD_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-standard")
 	awsRegion := getEnv("AWS_REGION", "us-east-1")
 	healthPort := getEnv("HEALTH_PORT", "8080")
 	workerCount := 1
@@ -69,7 +75,36 @@ func main() {
 	// Initialize repository and publisher
 	// Use WithOutboxTableName("custom_outbox") to customize table name
 	repo := pgx.NewOutboxRepository(pool)
-	publisher := sqspub.NewPublisher(sqsClient, sqsQueueURL)
+
+	var publisher core.Publisher
+
+	if *multiQueue {
+		// Multi-queue mode: route topics to different queues
+		logger.Info("multi-queue mode enabled")
+
+		// Create topic-to-queue router
+		// Default queue is the Standard queue (for testing)
+		router := sqspub.NewTopicQueueMap(standardQueueURL)
+
+		// Route specific order/payment topics to FIFO queue (strict ordering)
+		router.RegisterPrefix("payment.", sqsQueueURL)
+		router.RegisterPrefix("inventory.", sqsQueueURL)
+
+		// All other topics (including order.created for testing) use Standard queue
+		// This allows us to test receive_count behavior on Standard queue
+
+		logger.Info("multi-queue routing configured",
+			"default_queue", standardQueueURL,
+			"fifo_queue", sqsQueueURL,
+			"fifo_prefixes", []string{"payment.", "inventory."},
+		)
+
+		publisher = sqspub.NewMultiQueuePublisher(sqsClient, router)
+	} else {
+		// Single queue mode: publish all messages to one queue
+		logger.Info("single queue mode", "queue_url", sqsQueueURL)
+		publisher = sqspub.NewPublisher(sqsClient, sqsQueueURL)
+	}
 
 	// Revive stuck messages from previous crash (PUBLISHING -> FAILED)
 	revived, err := repo.ReviveStuckPublishing(ctx)
@@ -94,8 +129,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	mode := "single-queue"
+	if *multiQueue {
+		mode = "multi-queue"
+	}
 	logger.Info("dispatcher started",
-		"queue_url", sqsQueueURL,
+		"mode", mode,
 		"worker_count", workerCount,
 	)
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,10 @@ import (
 )
 
 func main() {
+	// Command-line flags
+	fifo := flag.Bool("fifo", false, "Connect to FIFO queue (default: Standard queue)")
+	flag.Parse()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
@@ -30,7 +35,15 @@ func main() {
 	// Configuration from environment
 	dbURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:15432/o4x?sslmode=disable")
 	sqsEndpoint := getEnv("SQS_ENDPOINT", "http://localhost:14566")
-	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events.fifo")
+
+	// Default: Standard queue, --fifo flag switches to FIFO queue
+	var sqsQueueURL string
+	if *fifo {
+		sqsQueueURL = getEnv("SQS_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events.fifo")
+	} else {
+		sqsQueueURL = getEnv("SQS_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-standard")
+	}
+
 	awsRegion := getEnv("AWS_REGION", "us-east-1")
 	healthPort := getEnv("HEALTH_PORT", "8081")
 
@@ -64,7 +77,6 @@ func main() {
 	})
 
 	// Initialize repository
-	// Use WithConsumerMessagesTableName("custom_consumer_messages") to customize table name
 	repo := pgx.NewConsumerRepository(pool)
 
 	// Revive stuck messages from previous crash (CONSUMING -> FAILED)
@@ -76,6 +88,12 @@ func main() {
 	if revived > 0 {
 		logger.Info("revived stuck consuming messages", "count", revived)
 	}
+
+	queueType := "Standard"
+	if *fifo {
+		queueType = "FIFO"
+	}
+	logger.Info("queue configuration", "type", queueType, "url", sqsQueueURL)
 
 	// Initialize topic router with handlers
 	router := consumer.NewTopicRouter()

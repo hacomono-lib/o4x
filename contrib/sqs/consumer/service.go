@@ -240,12 +240,12 @@ func (s *Service) pollAndProcess(ctx context.Context, logger *slog.Logger) {
 	}
 
 	output, err := s.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:                    aws.String(s.config.QueueURL),
-		MaxNumberOfMessages:         s.config.MaxNumberOfMessages,
-		WaitTimeSeconds:             s.config.WaitTimeSeconds,
-		VisibilityTimeout:           s.config.VisibilityTimeout,
-		MessageAttributeNames:       []string{"All"},
-		MessageSystemAttributeNames: []sqstypes.MessageSystemAttributeName{sqstypes.MessageSystemAttributeNameApproximateReceiveCount},
+		QueueUrl:              aws.String(s.config.QueueURL),
+		MaxNumberOfMessages:   s.config.MaxNumberOfMessages,
+		WaitTimeSeconds:       s.config.WaitTimeSeconds,
+		VisibilityTimeout:     s.config.VisibilityTimeout,
+		AttributeNames:        []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameAll}, // System attributes
+		MessageAttributeNames: []string{"All"},                                               // Custom message attributes
 	})
 	if err != nil {
 		// Don't log error if context was cancelled (graceful shutdown)

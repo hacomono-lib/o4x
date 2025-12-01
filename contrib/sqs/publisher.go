@@ -70,25 +70,50 @@ func buildMessageAttributes(msg *core.Outbox) map[string]sqstypes.MessageAttribu
 }
 
 // buildSendMessageInput creates a SendMessageInput from an outbox message
+// Automatically detects queue type (FIFO vs Standard) from URL
 func buildSendMessageInput(queueURL string, msg *core.Outbox) *sqs.SendMessageInput {
-	return &sqs.SendMessageInput{
-		QueueUrl:               aws.String(queueURL),
-		MessageBody:            aws.String(string(msg.Payload)),
-		MessageGroupId:         aws.String(msg.Topic),
-		MessageDeduplicationId: aws.String(msg.IdempotencyKey),
-		MessageAttributes:      buildMessageAttributes(msg),
+	input := &sqs.SendMessageInput{
+		QueueUrl:          aws.String(queueURL),
+		MessageBody:       aws.String(string(msg.Payload)),
+		MessageAttributes: buildMessageAttributes(msg),
 	}
+
+	// Only set FIFO-specific parameters if this is a FIFO queue
+	if isFifoQueue(queueURL) {
+		input.MessageGroupId = aws.String(msg.Topic)
+		input.MessageDeduplicationId = aws.String(msg.IdempotencyKey)
+	}
+
+	return input
 }
 
 // buildBatchEntry creates a SendMessageBatchRequestEntry from an outbox message
-func buildBatchEntry(msg *core.Outbox) sqstypes.SendMessageBatchRequestEntry {
-	return sqstypes.SendMessageBatchRequestEntry{
-		Id:                     aws.String(msg.ID),
-		MessageBody:            aws.String(string(msg.Payload)),
-		MessageGroupId:         aws.String(msg.Topic),
-		MessageDeduplicationId: aws.String(msg.IdempotencyKey),
-		MessageAttributes:      buildMessageAttributes(msg),
+// Automatically detects queue type (FIFO vs Standard) from message context
+func buildBatchEntry(queueURL string, msg *core.Outbox) sqstypes.SendMessageBatchRequestEntry {
+	entry := sqstypes.SendMessageBatchRequestEntry{
+		Id:                aws.String(msg.ID),
+		MessageBody:       aws.String(string(msg.Payload)),
+		MessageAttributes: buildMessageAttributes(msg),
 	}
+
+	// Only set FIFO-specific parameters if this is a FIFO queue
+	if isFifoQueue(queueURL) {
+		entry.MessageGroupId = aws.String(msg.Topic)
+		entry.MessageDeduplicationId = aws.String(msg.IdempotencyKey)
+	}
+
+	return entry
+}
+
+// isFifoQueue determines if a queue is FIFO based on its URL
+// FIFO queues have a .fifo suffix in their queue name
+func isFifoQueue(queueURL string) bool {
+	// Check if queue name ends with .fifo
+	// Examples:
+	// - https://sqs.us-east-1.amazonaws.com/123456789012/my-queue.fifo -> true
+	// - http://localhost:14566/000000000000/o4x-events.fifo -> true
+	// - http://localhost:14566/000000000000/o4x-events-standard -> false
+	return len(queueURL) >= 5 && queueURL[len(queueURL)-5:] == ".fifo"
 }
 
 // PublisherConfig holds configuration for the SQS publisher
@@ -273,7 +298,7 @@ func (p *BatchPublisher) PublishBatch(ctx context.Context, msgs []*core.Outbox) 
 			continue
 		}
 
-		entries = append(entries, buildBatchEntry(msg))
+		entries = append(entries, buildBatchEntry(p.queueURL, msg))
 	}
 
 	// If all messages failed validation, return early
@@ -429,7 +454,7 @@ func (p *MultiBatchPublisher) publishBatchToQueueWithLock(ctx context.Context, q
 				core.ErrPayloadTooLarge, len(im.msg.Payload), MaxSQSMessageSize))
 			continue
 		}
-		entries = append(entries, buildBatchEntry(im.msg))
+		entries = append(entries, buildBatchEntry(queueURL, im.msg))
 	}
 	mu.Unlock()
 

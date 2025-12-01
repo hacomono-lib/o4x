@@ -96,20 +96,57 @@ postgres://postgres:postgres@localhost:15432/o4x_test?sslmode=disable
 
 ```bash
 cd examples/local/cmd/enqueue
-go run main.go
+
+# ユニークなキーを生成して投入（繰り返しテスト可能）
+go run main.go -topic order.created -key order-$(date +%Y%m%d%H%M%S) -payload '{"order_id":"123","total":99.99}'
+
+# または固定のキーでテスト（idempotency確認用）
+go run main.go -topic order.created -key order-123 -payload '{"order_id":"123","total":99.99}'
 ```
 
 ### 2. Start Dispatcher
 
+**Single Queue Mode (default):**
 ```bash
 cd examples/local/cmd/dispatcher
 go run main.go
 ```
 
+**Multi-Queue Mode:**
+```bash
+cd examples/local/cmd/dispatcher
+go run main.go -multi-queue
+```
+
+Multi-queue mode では、トピックによって異なるキューにルーティングされます：
+- **デフォルト（`order.created`, `user.*`, `notification.*`など）** → Standard Queue（高スループット）
+- **`payment.*`, `inventory.*`** → FIFO Queue（順序保証が必要）
+
+環境変数でキューURLを変更できます：
+```bash
+SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events.fifo \
+STANDARD_QUEUE_URL=http://localhost:14566/000000000000/o4x-events-standard \
+go run main.go -multi-queue
+```
+```
+
 ### 3. Start Consumer
 
+**Standard Queue (default):**
 ```bash
 cd examples/local/cmd/consumer
+go run main.go
+```
+
+**FIFO Queue:**
+```bash
+cd examples/local/cmd/consumer
+go run main.go -fifo
+```
+
+環境変数でキューURLを変更できます：
+```bash
+SQS_QUEUE_URL=http://localhost:14566/000000000000/custom-queue \
 go run main.go
 ```
 
