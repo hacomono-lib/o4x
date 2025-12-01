@@ -20,7 +20,7 @@ o4x provides reliable message delivery from PostgreSQL to SQS using the [transac
 ## Features
 
 - **Transactional Outbox Pattern** - Atomic writes with your business data
-- **SQS FIFO Support** - Ordered delivery with deduplication
+- **SQS Support (Standard & FIFO)** - Choose between high throughput or ordered delivery
 - **Batch Processing** - High throughput with `SendMessageBatch`
 - **Graceful Shutdown** - Context-aware shutdown with proper cleanup
 - **Pluggable Repository** - pgx and GORM adapters included
@@ -94,10 +94,26 @@ stateDiagram-v2
 
 ### 2. Consumer (SQS-specific, Optional)
 
-An optional component for tracking SQS message consumption state. This is useful when you need to:
-- Track which messages have been processed
-- Implement idempotency checks
-- Debug message processing issues
+An optional component for processing SQS messages. The Consumer Repository (`consumer_messages` table) is **optional** and serves as an **audit log and observability tool**.
+
+**What the Repository does:**
+- ✅ **Records** all message processing attempts (status, errors, retry counts)
+- ✅ **Enables** detailed failure investigation and metrics collection
+- ✅ **Provides** crash recovery visibility via `ReviveStuckConsuming()`
+- ❌ **Does NOT prevent** duplicate Handler execution (Handler must be idempotent)
+- ❌ **Does NOT skip** Handler calls for duplicate messages
+
+**When to use the Repository:**
+- Compliance requirements (audit trail for processed messages)
+- Complex failure investigation (preserve error messages and context)
+- Detailed metrics (processing time, failure rates, duplicate detection)
+- Standard Queue usage (track duplicate delivery via `receive_count`)
+
+**When to skip the Repository:**
+- Simple, non-critical workloads (notifications, logs)
+- FIFO Queue with low failure rates (less duplicate delivery)
+- High-throughput scenarios (avoid DB write overhead)
+- Use `consumer.NewService(sqsClient, nil, handler, config)` with `nil` repository
 
 **Note:** The consumer is SQS-specific and located at `contrib/sqs/consumer`. If you use Kafka or other message brokers, they typically manage consumption state internally (e.g., Kafka offsets).
 
@@ -425,10 +441,16 @@ func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
 
 ```go
 // Consumer repository automatically tracks message status
+// Note: Repository records processing attempts but does NOT prevent duplicate Handler execution
+// Your handler must still be idempotent
 repo := pgx.NewConsumerRepository(pool)
 svc := consumer.NewService(sqsClient, repo, handler, config)
 
-// The repository prevents duplicate processing within the same service instance
+// Benefits:
+// - Audit trail: Full history of processing attempts
+// - Failure investigation: Preserve error messages
+// - Metrics: Query receive_count, processing times, failure rates
+// - Crash recovery: ReviveStuckConsuming() identifies stuck messages
 ```
 
 **4. Make Operations Idempotent**
@@ -618,16 +640,57 @@ See the detailed documentation for each adapter:
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/mydb?sslmode=disable
 SQS_ENDPOINT=http://localhost:4566  # For LocalStack
-SQS_QUEUE_URL=http://localhost:4566/000000000000/my-queue.fifo
 AWS_REGION=us-east-1
+
+# Standard Queue (high throughput, no ordering guarantee)
+SQS_QUEUE_URL=http://localhost:4566/000000000000/my-queue
+
+# FIFO Queue (ordered delivery, deduplication)
+SQS_QUEUE_URL=http://localhost:4566/000000000000/my-queue.fifo
 ```
 
-## SQS FIFO Queue
+## SQS Queue Types
 
-o4x uses SQS FIFO queues for ordered and deduplicated delivery:
+o4x supports both Standard and FIFO SQS queues. Choose based on your requirements:
 
-- `MessageGroupId` = topic (ensures ordering per topic)
-- `MessageDeduplicationId` = idempotency_key (prevents duplicates)
+### Standard Queue (Recommended for most use cases)
+
+```go
+// No .fifo suffix
+publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue")
+```
+
+- ✅ Higher throughput (nearly unlimited)
+- ✅ Lower cost ($0.40 per million requests)
+- ❌ No ordering guarantee
+- ❌ Possible duplicate delivery
+- **Use for:** Independent events, notifications, logs, analytics
+
+### FIFO Queue (Use when ordering matters)
+
+```go
+// Must end with .fifo
+publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue.fifo")
+```
+
+- ✅ Ordering guarantee (per MessageGroupId = topic)
+- ✅ Deduplication (5-minute window via MessageDeduplicationId = idempotency_key)
+- ❌ Lower throughput (300 msg/sec per queue, 3,000 with high throughput mode)
+- ❌ Higher cost ($0.50 per million requests)
+- **Use for:** Order workflows, payment processing, inventory updates
+
+### When to use which?
+
+| Scenario | Recommended Queue Type |
+|----------|----------------------|
+| Email notifications | **Standard** - Independent, high volume |
+| User registration events | **Standard** - One-time, no ordering needed |
+| Access logs | **Standard** - Timestamp-based, very high volume |
+| Order processing (created→paid→shipped) | **FIFO** - State transitions must be ordered |
+| Payment flows (authorize→capture→refund) | **FIFO** - Operations must follow sequence |
+| Inventory updates (+10, -5, +3) | **FIFO** - Math operations are order-sensitive |
+
+**Important**: Regardless of queue type, your consumer handlers must be idempotent. See the [Idempotency](#idempotency) section.
 
 ### Message Size Limits
 
@@ -655,21 +718,23 @@ publisher := sqs.NewBatchPublisher(sqsClient, queueURL)
 
 ### Multiple Queues
 
-For advanced use cases, route topics to different queues:
+For advanced use cases, route topics to different queues. You can mix Standard and FIFO queues:
 
 ```go
 import "github.com/hacomono-lib/o4x/contrib/sqs"
 
-// Create topic-to-queue router with a default queue
+// Create topic-to-queue router with a default queue (Standard or FIFO)
 // TopicQueueMap is thread-safe and can be registered concurrently
-router := sqs.NewTopicQueueMap("https://sqs.../default-queue.fifo")
+router := sqs.NewTopicQueueMap("https://sqs.../default-queue") // Standard
 
-// Route specific topics to dedicated queues
+// Route order topics to FIFO queue (ordering required)
 router.Register("order.created", "https://sqs.../orders-queue.fifo")
+router.Register("order.updated", "https://sqs.../orders-queue.fifo")
 router.Register("payment.completed", "https://sqs.../payments-queue.fifo")
 
-// Route by prefix (all "notification.*" topics go to notifications queue)
-router.RegisterPrefix("notification.", "https://sqs.../notifications-queue.fifo")
+// Route notification topics to Standard queue (high throughput, order doesn't matter)
+router.RegisterPrefix("notification.", "https://sqs.../notifications-queue") // Standard
+router.RegisterPrefix("log.", "https://sqs.../logs-queue") // Standard
 
 // Create multi-queue publisher
 publisher := sqs.NewMultiQueuePublisher(sqsClient, router)
@@ -680,10 +745,18 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 **Thread Safety**: `TopicQueueMap` is safe for concurrent use. You can call `Register()`, `RegisterPrefix()`, and `QueueURL()` from multiple goroutines without external synchronization.
 
 **When to use multiple queues:**
+- Different topics have different ordering requirements (FIFO vs Standard)
 - Different topics have different throughput requirements
 - Different teams own different topic consumers
 - Topics need different retry policies (VisibilityTimeout, MaxRetries)
 - Isolation between critical and non-critical events
+
+**Example routing strategy:**
+```
+Critical workflows   → FIFO queues   (orders, payments, inventory)
+High-volume logs     → Standard      (access logs, analytics)
+Notifications        → Standard      (emails, push notifications)
+```
 
 **Custom Router:**
 

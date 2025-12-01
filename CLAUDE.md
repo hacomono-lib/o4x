@@ -81,7 +81,16 @@ import (
 )
 
 repo := pgx.NewOutboxRepository(pool)
+
+// Single queue (Standard or FIFO)
 publisher := sqs.NewBatchPublisher(sqsClient, queueURL)
+
+// Or multi-queue with routing (mix Standard and FIFO)
+router := sqs.NewTopicQueueMap("https://sqs.../default-queue") // Standard
+router.Register("order.created", "https://sqs.../orders.fifo") // FIFO for orders
+router.RegisterPrefix("notification.", "https://sqs.../notifications") // Standard for notifications
+publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
+
 dispatcher := core.NewBatchDispatcher(repo, publisher, config)
 dispatcher.Start(ctx)
 ```
@@ -303,18 +312,31 @@ Each tier is independent - you only import what you need. The `core` package con
   - `BatchOutboxRepository` extends with batch operations
 
 - **contrib/sqs/**: SQS publisher implementations
+  - Supports both **Standard** and **FIFO** queues
   - `Publisher` / `BatchPublisher` - Single queue
   - `MultiQueuePublisher` / `MultiBatchPublisher` - Topic-based queue routing
   - `TopicQueueRouter` interface for custom routing logic
   - `TopicQueueMap` - Thread-safe implementation with sync.RWMutex (safe for concurrent Register/RegisterPrefix/QueueURL calls)
-  - `MessageGroupId` = topic (ordering)
-  - `MessageDeduplicationId` = idempotency_key
+  - For FIFO queues (*.fifo):
+    - `MessageGroupId` = topic (ordering per topic)
+    - `MessageDeduplicationId` = idempotency_key (5-minute deduplication)
+  - For Standard queues:
+    - MessageGroupId/DeduplicationId are sent but ignored by SQS
+    - Higher throughput, no ordering guarantee
+    - Handler must implement idempotency
 
 - **contrib/sqs/consumer/**: SQS message consumer (optional)
   - Only needed for SQS (Kafka manages offsets internally)
   - Consumer never updates outbox table
   - `Handler` interface with `TopicRouter` and `TypedHandler[T]` helpers
   - `Repository` interface is optional (can be nil for no DB tracking)
+  - **Repository purpose**: Audit log and observability (NOT execution control)
+    - ✅ Records all processing attempts (status, errors, retry counts)
+    - ✅ Enables detailed failure investigation and metrics
+    - ✅ Provides crash recovery visibility (`ReviveStuckConsuming`)
+    - ❌ Does NOT prevent Handler execution on duplicates
+    - ❌ Does NOT skip Handler calls
+    - Handler must be idempotent regardless of Repository usage
 
 - **contrib/pgx/**: PostgreSQL repository implementations using pgx (includes BatchOutboxRepository)
   - `WithTx(tx pgx.Tx)` - Returns repository that uses the given transaction
@@ -411,21 +433,71 @@ Outbox ID uses UUID v7 (string type) for time-ordered unique identifiers.
 
 ### Multi-Queue Routing (SQS)
 
-Route different topics to different SQS queues:
+Route different topics to different SQS queues. You can mix Standard and FIFO queues based on requirements:
 
 ```go
 import "github.com/hacomono-lib/o4x/contrib/sqs"
 
-router := sqs.NewTopicQueueMap("https://sqs.../default-queue.fifo")
+// Default queue can be Standard or FIFO
+router := sqs.NewTopicQueueMap("https://sqs.../default-queue") // Standard
+
+// Route topics requiring ordering to FIFO queues
 router.Register("order.created", "https://sqs.../orders-queue.fifo")
-router.RegisterPrefix("notification.", "https://sqs.../notifications-queue.fifo")
+router.Register("payment.completed", "https://sqs.../payments-queue.fifo")
+
+// Route high-throughput topics to Standard queues
+router.RegisterPrefix("notification.", "https://sqs.../notifications-queue") // Standard
+router.RegisterPrefix("log.", "https://sqs.../logs-queue") // Standard
 
 publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 ```
 
-**Message Ordering Guarantees:**
+**SQS Queue Type Selection:**
 
-o4x provides different ordering guarantees depending on your SQS queue configuration:
+o4x supports both Standard and FIFO SQS queues. Choose based on your requirements:
+
+**Standard Queue (Recommended for most use cases):**
+- ✅ Higher throughput (nearly unlimited)
+- ✅ Lower cost ($0.40 per million requests)
+- ✅ Simpler setup (no `.fifo` suffix needed)
+- ❌ No ordering guarantee (messages may arrive out of order)
+- ❌ Possible duplicate delivery (at-least-once, not exactly-once)
+- **Use for:** Independent events, notifications, logs, analytics, high-volume operations
+
+**FIFO Queue (*.fifo) (Use when ordering matters):**
+- ✅ Ordering guarantee (per MessageGroupId = topic)
+- ✅ Deduplication (5-minute window via MessageDeduplicationId = idempotency_key)
+- ❌ Lower throughput (300 msg/sec per queue, 3,000 with high throughput mode)
+- ❌ Higher cost ($0.50 per million requests)
+- **Use for:** State transitions, inventory updates, payment processing, order workflows
+
+**Decision Flow:**
+
+```
+Does the same entity receive multiple sequential operations?
+  NO  → Standard Queue
+  YES ↓
+
+Does processing order affect the final result?
+  NO  → Standard Queue (use timestamp/version for conflict resolution)
+  YES ↓
+
+FIFO Queue recommended
+```
+
+**Examples:**
+
+| Use Case | Queue Type | Reason |
+|----------|-----------|--------|
+| Order processing (created→updated→cancelled) | **FIFO** | State transitions must be ordered |
+| Payment processing (authorize→capture→refund) | **FIFO** | Operations must follow sequence |
+| Inventory updates (add/subtract operations) | **FIFO** | Math operations are order-sensitive |
+| Email/SMS notifications | **Standard** | Independent, order doesn't matter |
+| Access logs | **Standard** | Timestamp-based, high volume |
+| Analytics events | **Standard** | Aggregated later, high throughput |
+| User registration emails | **Standard** | One-time event, no ordering needed |
+
+**Message Ordering Guarantees:**
 
 1. **FIFO Queue (*.fifo)**: Messages with the same `MessageGroupId` are delivered in order
    - o4x sets `MessageGroupId = topic` by default
@@ -436,20 +508,21 @@ o4x provides different ordering guarantees depending on your SQS queue configura
 2. **Multi-Queue with FIFO**: Each queue maintains separate ordering
    - Messages routed to different queues have independent ordering
    - Example:
-     - Queue A: "order.created" messages (ordered within this queue)
-     - Queue B: "notification.sent" messages (ordered within this queue)
+     - Queue A (FIFO): "order.created" messages (ordered within this queue)
+     - Queue B (Standard): "notification.sent" messages (unordered, high throughput)
      - No ordering guarantee between Queue A and Queue B
 
-3. **Standard Queue (non-FIFO)**: Best-effort ordering only
+3. **Standard Queue**: Best-effort ordering only
    - SQS does not guarantee message order
    - Messages may be delivered out of insertion order
-   - Use FIFO queues if ordering is critical
+   - Use timestamp or version fields if you need to handle ordering at application level
 
 **Idempotency and Deduplication:**
 
-- `MessageDeduplicationId = idempotency_key` ensures exactly-once publishing within SQS's 5-minute deduplication window
-- Application handlers must still be idempotent for at-least-once delivery guarantee
-- See "Idempotency Implementation Without Repository" example below for handler-level idempotency
+- **FIFO Queue**: `MessageDeduplicationId = idempotency_key` provides 5-minute deduplication window at SQS level
+- **Standard Queue**: No SQS-level deduplication, application handlers MUST implement idempotency
+- **Both queues**: Application handlers must still be idempotent for at-least-once delivery guarantee
+- See "Idempotency Implementation Without Repository" section below for handler-level idempotency strategies
 
 **Batch Publishing and Ordering:**
 
@@ -462,8 +535,13 @@ o4x provides different ordering guarantees depending on your SQS queue configura
 ```
 DATABASE_URL=postgres://postgres:postgres@localhost:15432/o4x?sslmode=disable
 SQS_ENDPOINT=http://localhost:14566
-SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events.fifo
 AWS_REGION=us-east-1
+
+# Standard Queue (high throughput, no ordering guarantee)
+SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events
+
+# FIFO Queue (ordered delivery, deduplication)
+SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events.fifo
 ```
 
 ### Important Constraints and Limits
@@ -641,6 +719,17 @@ See `examples/local/cmd/dispatcher/main.go` and `examples/local/cmd/consumer/mai
 
 The Consumer `Repository` is **optional**. There are two approaches to idempotency:
 
+**Important: Understanding Repository's Role in Duplicate Detection**
+
+The `consumer_messages` table provides different guarantees depending on queue type:
+
+- **FIFO Queue**: SQS already prevents duplicates (5-minute window). Repository mainly provides audit trail.
+- **Standard Queue**: SQS may send duplicates. Repository **detects** duplicates (tracks `message_id`) but does **NOT prevent Handler execution**. Your Handler must still be idempotent.
+
+**Key difference from FIFO:**
+- **FIFO**: Duplicates never reach Consumer (blocked at SQS)
+- **Standard + Repository**: Duplicates reach Consumer, are recorded in `consumer_messages`, but Handler still executes
+
 #### Approach 1: With Consumer Repository (DB-Tracked)
 
 o4x provides a built-in `consumer_messages` table to track message processing state:
@@ -687,10 +776,27 @@ service.Start(ctx)
 4. **On failure** → `UpdateToFailed()` or `UpdateToDead()`
 
 **Benefits:**
-- ✅ Audit trail: Full history of all message processing attempts
-- ✅ Monitoring: Query DB for FAILED/DEAD messages
-- ✅ Crash recovery: `ReviveStuckConsuming()` handles stuck CONSUMING messages
-- ✅ Metrics: Track processing times, failure rates, receive counts
+- ✅ **Audit trail**: Full history of all message processing attempts (compliance requirement for finance/healthcare)
+- ✅ **Failure investigation**: Preserve error messages and context (unlike SQS DLQ which only keeps message body)
+- ✅ **Crash recovery visibility**: `ReviveStuckConsuming()` identifies which messages were being processed during crash
+- ✅ **Metrics and monitoring**: Query processing times, failure rates, duplicate delivery rates (`receive_count > 1`)
+- ✅ **Alerting**: Hook into `OnMessageDead` with full context from DB for Slack/PagerDuty alerts
+
+**Use cases:**
+```sql
+-- Find messages that failed multiple times (debugging pattern)
+SELECT message_id, error_message, receive_count
+FROM consumer_messages
+WHERE status = 'FAILED' AND receive_count > 3;
+
+-- Detect duplicate delivery rate (Standard Queue monitoring)
+SELECT COUNT(*) * 100.0 / (SELECT COUNT(*) FROM consumer_messages) as duplicate_percentage
+FROM consumer_messages WHERE receive_count > 1;
+
+-- Calculate average processing time
+SELECT AVG(EXTRACT(EPOCH FROM (processed_at - created_at))) as avg_seconds
+FROM consumer_messages WHERE status = 'CONSUMED';
+```
 
 **Database Schema:**
 ```sql
