@@ -117,12 +117,12 @@ stateDiagram-v2
 **Common scenarios:**
 - **Normal flow**: Receive from SQS → Handler succeeds → CONSUMED → SQS message deleted
 - **Temporary failure**: Handler error (e.g., downstream API timeout) → FAILED → SQS visibility timeout expires → retry
-- **Permanent failure**: 3 consecutive handler failures → DEAD → SQS moves to DLQ
+- **Permanent failure**: MaxRetries exceeded (default: 5) → DEAD → SQS message deleted (NOT moved to DLQ)
 - **Crash during consuming**: Process killed while handler running → ReviveStuckConsuming on restart → FAILED → SQS retries
 
 **Operational actions:**
 - **FAILED**: Usually auto-recovers via SQS visibility timeout. Check handler logs and `error_message`: `SELECT id, receive_count, error_message FROM consumer_messages WHERE status = 'FAILED'`. Fix handler bugs if persistent.
-- **DEAD**: Message in DLQ requires manual intervention. Query: `SELECT id, message_id, error_message FROM consumer_messages WHERE status = 'DEAD'`. Options: (1) Fix handler and redrive from DLQ, (2) Manual processing, (3) Archive/delete if invalid. Use AWS CLI: `aws sqs start-message-move-task --source-arn <DLQ-ARN>`. See CLAUDE.md for detailed recovery procedures.
+- **DEAD**: Message deleted from SQS, preserved in `consumer_messages` table. Query: `SELECT id, message_id, error_message FROM consumer_messages WHERE status = 'DEAD'`. Use `OnMessageDead` hook to preserve payloads. Options: (1) Extract payload and re-insert to outbox table, (2) Manual processing, (3) Archive/delete if invalid. See CLAUDE.md for detailed recovery procedures.
 
 **Important:** Outbox and Consumer have completely separate state machines. The consumer never updates the outbox table.
 
@@ -682,7 +682,7 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 **When to use multiple queues:**
 - Different topics have different throughput requirements
 - Different teams own different topic consumers
-- Topics need different retry/DLQ policies
+- Topics need different retry policies (VisibilityTimeout, MaxRetries)
 - Isolation between critical and non-critical events
 
 **Custom Router:**
@@ -723,7 +723,7 @@ hooks := &core.Hooks{
     },
     OnMessageDead: func(ctx context.Context, msg *core.Outbox, err error) {
         metrics.IncrCounter("outbox.message.dead", "topic", msg.Topic)
-        // Send to DLQ, alert ops team, etc.
+        // Alert ops team, log to monitoring system, etc.
     },
 }
 

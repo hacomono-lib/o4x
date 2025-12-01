@@ -203,9 +203,9 @@ Each tier is independent - you only import what you need. The `core` package con
    - Status updates back to CONSUMING, handler retries
 
 3. **Permanent failure (FAILED → DEAD)**
-   - Message fails processing 3 times (SQS maxReceiveCount=3)
-   - On 4th receive, receive_count > max_retries
-   - Status updates to DEAD, SQS moves message to DLQ automatically
+   - Message fails processing repeatedly until receive_count >= max_retries (default: 5)
+   - o4x marks status as DEAD and deletes message from SQS
+   - Message is NOT moved to DLQ (o4x handles DEAD messages via DB + Hooks)
    - No further processing attempts
 
 4. **Crash during consuming**
@@ -243,42 +243,53 @@ Each tier is independent - you only import what you need. The `core` package con
 
 **When message is DEAD:**
 - **Alert immediately**: Message exceeded max retries, likely requires manual intervention
-- **Investigation**: Check DLQ for the actual SQS message and consumer_messages table for processing history
+  - Use `OnMessageDead` hook to send alerts to Slack/PagerDuty
+  - SQS message is already deleted (not in DLQ)
+- **Investigation**: Query `consumer_messages` table for processing history
   ```sql
   SELECT id, message_id, receive_count, error_message, last_error_at, created_at
   FROM consumer_messages WHERE status = 'DEAD' ORDER BY created_at DESC LIMIT 10;
   ```
+  - If using Repository: Message payload may be preserved via custom logging in OnMessageDead hook
+  - If not using Repository: Must implement custom payload persistence in handler
 - **Common causes**:
   - Persistent handler bug → Fix handler logic and redeploy
   - Invalid message payload → Sender produced malformed data
   - Required downstream service permanently down → Fix infrastructure
   - Business rule violation → Payload doesn't meet validation requirements
 - **Recovery options**:
-  1. **Fix handler and replay from DLQ**:
-     - Fix handler bug
-     - Redrive messages from DLQ back to main queue (via AWS Console or CLI)
-     - Consumer will reprocess with fixed logic
+  1. **Manual re-publishing** (if payload preserved):
+     - Extract payload from your logging system or DB
+     - Re-insert to outbox table manually: `INSERT INTO outbox (topic, payload, ...) VALUES (...)`
+     - Dispatcher will pick it up and publish to SQS again
   2. **Manual processing**:
-     - Fetch message from DLQ
+     - Extract payload from logs or DB
      - Process manually (e.g., database insert, API call)
-     - Delete from DLQ
+     - Mark as resolved in tracking system
   3. **Ignore and archive**: If message is invalid or no longer relevant
      ```sql
      DELETE FROM consumer_messages WHERE status = 'DEAD' AND created_at < NOW() - INTERVAL '30 days';
      ```
-- **SQS DLQ management**:
-  ```bash
-  # List messages in DLQ
-  aws sqs receive-message --queue-url <DLQ-URL> --max-number-of-messages 10
+- **Payload preservation strategy** (implement in OnMessageDead hook):
+  ```go
+  hooks := &consumer.Hooks{
+      OnMessageDead: func(ctx context.Context, msg *consumer.SQSMessage, err error) {
+          // Save to dead messages table for investigation
+          db.Exec(ctx, `INSERT INTO dead_messages (message_id, topic, payload, error)
+                        VALUES ($1, $2, $3, $4)`,
+              msg.MessageID, msg.Topic, msg.Body, err.Error())
 
-  # Redrive messages from DLQ back to main queue
-  aws sqs start-message-move-task --source-arn <DLQ-ARN>
+          // Alert ops team
+          slackClient.SendAlert(ctx, fmt.Sprintf("DEAD: %s - %v", msg.Topic, err))
+      },
+  }
   ```
 - **Preventive measures**:
   - Add input validation in handler before processing
   - Implement comprehensive error handling with specific error types
-  - Set up monitoring for DEAD message rate
-  - Regular DLQ inspection and cleanup procedures
+  - Set up monitoring for DEAD message rate (via OnMessageDead hook)
+  - Preserve payloads in OnMessageDead hook for recovery
+  - Regular cleanup: `DELETE FROM consumer_messages WHERE status = 'DEAD' AND created_at < NOW() - INTERVAL '30 days'`
 
 ### Key Components
 
@@ -787,7 +798,8 @@ func (h *OrderHandler) processNewOrder(ctx context.Context, tx *sql.Tx, event Or
 If you don't need message processing audit trail, you can skip the repository and implement idempotency at the application level:
 
 ```go
-// No repository - relies on SQS visibility timeout + DLQ + application idempotency
+// No repository - relies on SQS visibility timeout + application idempotency
+// DEAD messages are deleted from SQS (not moved to DLQ)
 service := consumer.NewService(sqsClient, nil, handler, config)
 service.Start(ctx)
 ```
@@ -990,7 +1002,7 @@ func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) err
      - You want built-in crash recovery (`ReviveStuckConsuming`)
    - **Skip Repository when:**
      - Simple use case with no audit requirements
-     - Relying on SQS DLQ is sufficient
+     - Handler-level idempotency + OnMessageDead hook is sufficient
      - Minimizing DB tables is a priority
 
 3. **Choose handler idempotency strategy:**
@@ -1011,4 +1023,4 @@ func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) err
 6. **Monitor duplicate rates:**
    - Track `rowsAffected == 0` or cache hits in handlers
    - With Repository: Query `consumer_messages` for receive_count > 1
-   - Alert if duplicate rate is unusually high (may indicate retry storms or DLQ issues)
+   - Alert if duplicate rate is unusually high (may indicate retry storms or configuration issues)
