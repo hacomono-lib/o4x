@@ -72,8 +72,30 @@ type Dispatcher struct {
 	lastProcessedAt *time.Time
 }
 
-// NewDispatcher creates a new Dispatcher
-func NewDispatcher(repo OutboxRepository, publisher Publisher, config DispatcherConfig) *Dispatcher {
+// NewDispatcher creates a new Dispatcher with configuration validation
+// Returns an error if the configuration is invalid.
+func NewDispatcher(repo OutboxRepository, publisher Publisher, config DispatcherConfig) (*Dispatcher, error) {
+	// Validate negative values
+	if config.PollInterval < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.MaxPollInterval < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.WorkerCount < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.ShutdownTimeout < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.ForceTimeout < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.CleanupTimeout < 0 {
+		return nil, ErrInvalidConfig
+	}
+
+	// Apply defaults
 	if config.PollInterval == 0 {
 		config.PollInterval = 100 * time.Millisecond
 	}
@@ -99,11 +121,20 @@ func NewDispatcher(repo OutboxRepository, publisher Publisher, config Dispatcher
 		config.CleanupTimeout = 10 * time.Second
 	}
 
+	// Validate timeout consistency
+	if config.ForceTimeout < config.ShutdownTimeout {
+		config.Logger.Warn("ForceTimeout is less than ShutdownTimeout, adjusting ForceTimeout",
+			"shutdown_timeout", config.ShutdownTimeout,
+			"force_timeout", config.ForceTimeout,
+			"adjusted_force_timeout", config.ShutdownTimeout*2)
+		config.ForceTimeout = config.ShutdownTimeout * 2
+	}
+
 	return &Dispatcher{
 		repo:      repo,
 		publisher: publisher,
 		config:    config,
-	}
+	}, nil
 }
 
 // Start begins the dispatcher and its workers

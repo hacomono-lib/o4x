@@ -35,7 +35,8 @@ func (s *BatchDispatcherSuite) TestNewBatchDispatcher_WithDefaultConfig() {
 	config := DefaultBatchDispatcherConfig()
 
 	// Act
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 
 	// Assert
 	assert.NotNil(s.T(), dispatcher)
@@ -68,7 +69,8 @@ func (s *BatchDispatcherSuite) TestNewBatchDispatcher_WithCustomConfig() {
 	}
 
 	// Act
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 
 	// Assert
 	assert.Equal(s.T(), 200*time.Millisecond, dispatcher.config.PollInterval)
@@ -92,7 +94,8 @@ func (s *BatchDispatcherSuite) TestNewBatchDispatcher_LimitsBatchSizeToPublisher
 	}
 
 	// Act
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 
 	// Assert
 	assert.Equal(s.T(), 5, dispatcher.config.BatchSize, "should be limited to publisher's MaxBatchSize")
@@ -104,11 +107,12 @@ func (s *BatchDispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublish
 		Logger:      s.logger,
 		AutoRecover: true,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 
 	// Assert
@@ -122,11 +126,12 @@ func (s *BatchDispatcherSuite) TestStart_WithoutAutoRecover_DoesNotCallReviveStu
 		Logger:      s.logger,
 		AutoRecover: false,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 
 	// Assert
@@ -141,14 +146,15 @@ func (s *BatchDispatcherSuite) TestStartAndStop_IsRunningReflectsState() {
 		AutoRecover:     false,
 		ShutdownTimeout: 5 * time.Second,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Assert - not running initially
 	assert.False(s.T(), dispatcher.IsRunning())
 
 	// Act - start
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 	assert.True(s.T(), dispatcher.IsRunning())
 
@@ -173,11 +179,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_ProcessesBatchOfMessages() {
 		BatchSize:    10,
 		WorkerCount:  1,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for messages to be processed
@@ -227,11 +234,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_HandlesPartialBatchFailure() 
 		BatchSize:    10,
 		WorkerCount:  1,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for messages to be processed
@@ -270,11 +278,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadAfterMaxRetri
 		BatchSize:    10,
 		WorkerCount:  1,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -310,11 +319,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnPermanentEr
 		BatchSize:    10,
 		WorkerCount:  1,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -358,11 +368,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_CallsBatchHooks() {
 		WorkerCount:  1,
 		Hooks:        hooks,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for messages to be processed
@@ -388,11 +399,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_RequeueWorkerCallsRequeueFail
 		RequeueBackoffMax:  1 * time.Hour,
 		WorkerCount:        1,
 	}
-	dispatcher := NewBatchDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for requeue worker to run

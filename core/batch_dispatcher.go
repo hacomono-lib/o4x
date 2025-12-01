@@ -88,8 +88,42 @@ type BatchDispatcher struct {
 	lastProcessedAt *time.Time
 }
 
-// NewBatchDispatcher creates a new BatchDispatcher
-func NewBatchDispatcher(repo BatchOutboxRepository, publisher BatchPublisher, config BatchDispatcherConfig) *BatchDispatcher {
+// NewBatchDispatcher creates a new BatchDispatcher with configuration validation
+// Returns an error if the configuration is invalid.
+func NewBatchDispatcher(repo BatchOutboxRepository, publisher BatchPublisher, config BatchDispatcherConfig) (*BatchDispatcher, error) {
+	// Validate negative values
+	if config.PollInterval < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.MaxPollInterval < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.BatchSize < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.WorkerCount < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.ShutdownTimeout < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.ForceTimeout < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.RequeueInterval < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.RequeueBackoffBase < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.RequeueBackoffMax < 0 {
+		return nil, ErrInvalidConfig
+	}
+	if config.CleanupTimeout < 0 {
+		return nil, ErrInvalidConfig
+	}
+
+	// Apply defaults
 	if config.PollInterval == 0 {
 		config.PollInterval = 100 * time.Millisecond
 	}
@@ -97,9 +131,6 @@ func NewBatchDispatcher(repo BatchOutboxRepository, publisher BatchPublisher, co
 		config.MaxPollInterval = config.PollInterval * 32
 	}
 	if config.BatchSize == 0 {
-		config.BatchSize = publisher.MaxBatchSize()
-	}
-	if config.BatchSize > publisher.MaxBatchSize() {
 		config.BatchSize = publisher.MaxBatchSize()
 	}
 	if config.WorkerCount == 0 {
@@ -127,11 +158,34 @@ func NewBatchDispatcher(repo BatchOutboxRepository, publisher BatchPublisher, co
 		config.CleanupTimeout = 10 * time.Second
 	}
 
+	// Validate BatchSize against publisher's maximum
+	if config.BatchSize > publisher.MaxBatchSize() {
+		config.Logger.Warn("BatchSize exceeds publisher limit, adjusting to publisher's MaxBatchSize",
+			"requested_batch_size", config.BatchSize,
+			"publisher_max_batch_size", publisher.MaxBatchSize())
+		config.BatchSize = publisher.MaxBatchSize()
+	}
+
+	// Validate timeout consistency
+	if config.ForceTimeout < config.ShutdownTimeout {
+		config.Logger.Warn("ForceTimeout is less than ShutdownTimeout, adjusting ForceTimeout",
+			"shutdown_timeout", config.ShutdownTimeout,
+			"force_timeout", config.ForceTimeout,
+			"adjusted_force_timeout", config.ShutdownTimeout*2)
+		config.ForceTimeout = config.ShutdownTimeout * 2
+	}
+
+	// Warn about RequeueInterval = 0 (common misconfiguration)
+	if config.RequeueInterval == 0 {
+		config.Logger.Warn("RequeueInterval is 0, FAILED messages will NOT be retried automatically. " +
+			"This is likely a misconfiguration. Set to 10s for normal workloads.")
+	}
+
 	return &BatchDispatcher{
 		repo:      repo,
 		publisher: publisher,
 		config:    config,
-	}
+	}, nil
 }
 
 // Start begins the batch dispatcher

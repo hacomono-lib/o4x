@@ -117,11 +117,15 @@ func main() {
 	}
 
 	// Initialize dispatcher
-	dispatcher := core.NewDispatcher(repo, publisher, core.DispatcherConfig{
+	dispatcher, err := core.NewDispatcher(repo, publisher, core.DispatcherConfig{
 		PollInterval: pollInterval,
 		WorkerCount:  workerCount,
 		Logger:       logger,
 	})
+	if err != nil {
+		logger.Error("failed to create dispatcher", "error", err)
+		os.Exit(1)
+	}
 
 	// Start dispatcher
 	if err := dispatcher.Start(ctx); err != nil {

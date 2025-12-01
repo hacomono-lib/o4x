@@ -19,14 +19,20 @@ const (
 	MaxSQSMessageSize = 256 * 1024 // 256 KB
 )
 
+// SQSClient interface for SQS operations (for testing)
+type SQSClient interface {
+	SendMessage(ctx context.Context, params *sqs.SendMessageInput, optFns ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+	SendMessageBatch(ctx context.Context, params *sqs.SendMessageBatchInput, optFns ...func(*sqs.Options)) (*sqs.SendMessageBatchOutput, error)
+}
+
 // Publisher implements core.Publisher for AWS SQS FIFO queues
 type Publisher struct {
-	client   *sqs.Client
+	client   SQSClient
 	queueURL string
 }
 
 // NewPublisher creates a new SQS publisher
-func NewPublisher(client *sqs.Client, queueURL string) *Publisher {
+func NewPublisher(client SQSClient, queueURL string) *Publisher {
 	return &Publisher{
 		client:   client,
 		queueURL: queueURL,
@@ -215,12 +221,12 @@ func (m *TopicQueueMap) QueueURL(topic string) string {
 
 // MultiQueuePublisher implements core.Publisher with topic-based queue routing
 type MultiQueuePublisher struct {
-	client *sqs.Client
+	client SQSClient
 	router TopicQueueRouter
 }
 
 // NewMultiQueuePublisher creates a new multi-queue SQS publisher
-func NewMultiQueuePublisher(client *sqs.Client, router TopicQueueRouter) *MultiQueuePublisher {
+func NewMultiQueuePublisher(client SQSClient, router TopicQueueRouter) *MultiQueuePublisher {
 	return &MultiQueuePublisher{
 		client: client,
 		router: router,
@@ -249,12 +255,12 @@ const sqsMaxBatchSize = 10
 // BatchPublisher implements core.BatchPublisher for AWS SQS FIFO queues
 // It uses SendMessageBatch for improved throughput
 type BatchPublisher struct {
-	client   *sqs.Client
+	client   SQSClient
 	queueURL string
 }
 
 // NewBatchPublisher creates a new SQS batch publisher
-func NewBatchPublisher(client *sqs.Client, queueURL string) *BatchPublisher {
+func NewBatchPublisher(client SQSClient, queueURL string) *BatchPublisher {
 	return &BatchPublisher{
 		client:   client,
 		queueURL: queueURL,
@@ -368,12 +374,12 @@ func (p *BatchPublisher) MaxBatchSize() int {
 
 // MultiBatchPublisher implements core.BatchPublisher with topic-based queue routing
 type MultiBatchPublisher struct {
-	client *sqs.Client
+	client SQSClient
 	router TopicQueueRouter
 }
 
 // NewMultiBatchPublisher creates a new multi-queue SQS batch publisher
-func NewMultiBatchPublisher(client *sqs.Client, router TopicQueueRouter) *MultiBatchPublisher {
+func NewMultiBatchPublisher(client SQSClient, router TopicQueueRouter) *MultiBatchPublisher {
 	return &MultiBatchPublisher{
 		client: client,
 		router: router,

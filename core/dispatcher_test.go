@@ -35,7 +35,8 @@ func (s *DispatcherSuite) TestNewDispatcher_WithDefaultConfig() {
 	config := DefaultDispatcherConfig()
 
 	// Act
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 
 	// Assert
 	assert.NotNil(s.T(), dispatcher)
@@ -60,7 +61,8 @@ func (s *DispatcherSuite) TestNewDispatcher_WithCustomConfig() {
 	}
 
 	// Act
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 
 	// Assert
 	assert.Equal(s.T(), 200*time.Millisecond, dispatcher.config.PollInterval)
@@ -77,10 +79,11 @@ func (s *DispatcherSuite) TestStart_WhenAlreadyRunning_ReturnsError() {
 		Logger:      s.logger,
 		AutoRecover: false,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 	defer dispatcher.Stop()
 
@@ -98,11 +101,12 @@ func (s *DispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublishing()
 		Logger:      s.logger,
 		AutoRecover: true,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 
 	// Assert
@@ -116,11 +120,12 @@ func (s *DispatcherSuite) TestStart_WithoutAutoRecover_DoesNotCallReviveStuckPub
 		Logger:      s.logger,
 		AutoRecover: false,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 
 	// Assert
@@ -135,14 +140,15 @@ func (s *DispatcherSuite) TestStartAndStop_IsRunningReflectsState() {
 		AutoRecover:     false,
 		ShutdownTimeout: 5 * time.Second,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Assert - not running initially
 	assert.False(s.T(), dispatcher.IsRunning())
 
 	// Act - start
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 	assert.True(s.T(), dispatcher.IsRunning())
 
@@ -164,11 +170,12 @@ func (s *DispatcherSuite) TestDispatcher_ProcessesMessages() {
 		PollInterval: 10 * time.Millisecond,
 		WorkerCount:  1,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -196,11 +203,12 @@ func (s *DispatcherSuite) TestDispatcher_HandlesPublishFailure() {
 		PollInterval: 10 * time.Millisecond,
 		WorkerCount:  1,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -228,11 +236,12 @@ func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadAfterMaxRetries() {
 		PollInterval: 10 * time.Millisecond,
 		WorkerCount:  1,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -259,11 +268,12 @@ func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadOnPermanentError() {
 		PollInterval: 10 * time.Millisecond,
 		WorkerCount:  1,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -297,11 +307,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishStart() {
 		WorkerCount:  1,
 		Hooks:        hooks,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -335,11 +346,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishSuccess() {
 		WorkerCount:  1,
 		Hooks:        hooks,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -379,11 +391,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishFailure() {
 		WorkerCount:  1,
 		Hooks:        hooks,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed
@@ -422,11 +435,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnMessageDead() {
 		WorkerCount:  1,
 		Hooks:        hooks,
 	}
-	dispatcher := NewDispatcher(s.repo, s.publisher, config)
+	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
 	ctx := context.Background()
 
 	// Act
-	err := dispatcher.Start(ctx)
+	err = dispatcher.Start(ctx)
 	assert.NoError(s.T(), err)
 
 	// Wait for message to be processed

@@ -865,6 +865,157 @@ sqsClient := sqs.NewFromConfig(cfg)
 publisher := sqspub.NewPublisher(sqsClient, queueURL)
 ```
 
+## Operational Considerations
+
+### Partial Batch Success
+
+When using `BatchDispatcher`, the `UpdateBatchToPublished` method may return fewer updated rows than the number of IDs provided:
+
+```go
+// BatchDispatcher publishes 10 messages, but only 7 are updated to PUBLISHED
+updatedCount, err := repo.UpdateBatchToPublished(ctx, successIDs)
+// updatedCount might be 7 instead of 10
+```
+
+**Why this happens:**
+- Messages in states other than `PUBLISHING` cannot be updated
+- During crash recovery, some messages may have already been processed
+- This is normal behavior and handled gracefully by the system
+
+**What happens to the remaining messages:**
+- They remain in `PUBLISHING` state temporarily
+- `ReviveStuckPublishing()` will move them to `FAILED` on the next startup (5+ minutes old)
+- They will be retried through the normal retry mechanism
+
+**When to investigate:**
+- If partial success occurs frequently (>5% of batches), check:
+  - Database connection stability
+  - Network reliability between application and database
+  - Database performance (slow queries, high load)
+
+### At-Least-Once Delivery Guarantees
+
+o4x guarantees **at-least-once delivery**, not exactly-once. Messages may be delivered multiple times in these scenarios:
+
+**Duplicate Delivery Scenarios:**
+
+1. **Publisher crash during state transition**
+   ```
+   1. Message published to SQS successfully
+   2. Process crashes before UpdateToPublished completes
+   3. On restart, ReviveStuckPublishing moves message to FAILED
+   4. Message is retried → Published again to SQS (duplicate)
+   ```
+
+2. **Database transaction rollback**
+   ```
+   1. UpdateToPublished transaction starts
+   2. Transaction rolls back due to database error
+   3. Message remains in PUBLISHING state
+   4. Eventually retried → Published again (duplicate)
+   ```
+
+3. **Consumer processing timeout**
+   ```
+   1. Handler processes message successfully
+   2. Processing takes longer than SQS VisibilityTimeout
+   3. Message becomes visible in SQS again
+   4. Another consumer receives the same message (duplicate)
+   ```
+
+**Mitigation Strategies:**
+
+✅ **Required: Idempotent Handlers**
+```go
+func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    // Use database unique constraint
+    result, err := h.db.Exec(ctx,
+        `INSERT INTO orders (id, customer_id, message_id, created_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (message_id) DO NOTHING`,
+        orderID, customerID, msg.MessageID)
+
+    if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
+        // Already processed - return success
+        return nil
+    }
+
+    // Process new order...
+}
+```
+
+✅ **Recommended: Use IdempotencyKey**
+- Publisher: Set unique `IdempotencyKey` when inserting to outbox
+- Consumer: Use `msg.MessageID` or `msg.IdempotencyKey` for deduplication
+- FIFO queues provide 5-minute deduplication via MessageDeduplicationId
+
+✅ **Optional: Track Duplicates**
+```go
+hooks := &core.Hooks{
+    OnPublishSuccess: func(ctx context.Context, msg *core.Outbox, duration time.Duration) {
+        // Check if this message was published before
+        var count int
+        db.QueryRow("SELECT COUNT(*) FROM published_messages WHERE outbox_id = $1", msg.ID).Scan(&count)
+        if count > 1 {
+            metrics.IncrCounter("outbox.duplicates", "topic", msg.Topic)
+        }
+    },
+}
+```
+
+### Performance Tuning
+
+**BatchDispatcher Configuration:**
+
+| Workload | BatchSize | WorkerCount | RequeueInterval | Expected Throughput |
+|----------|-----------|-------------|-----------------|---------------------|
+| Low volume (<100 msg/min) | 5 | 1 | 30s | ~100 msg/min |
+| Medium volume (100-1000 msg/min) | 10 | 2-4 | 10s | ~1,000-5,000 msg/min |
+| High volume (>1000 msg/min) | 10 | 8-16 | 5s | ~5,000-20,000 msg/min |
+
+**Database Connection Pool:**
+```go
+// For BatchDispatcher with 10 workers
+maxConns := WorkerCount * 2 + 5  // ~25 connections
+pool, _ := pgxpool.New(ctx, fmt.Sprintf("%s&pool_max_conns=%d", dbURL, maxConns))
+```
+
+**Worker Count Guidelines:**
+- **Too few workers**: Messages pile up in ENQUEUED state, increased latency
+- **Too many workers**: Database connection pool exhaustion, lock contention
+- **Rule of thumb**: Start with `WorkerCount = 2 * CPU cores`, adjust based on metrics
+
+**PollInterval Tuning:**
+- **100ms (default)**: Balanced latency and database load
+- **10ms**: Ultra-low latency (<100ms P99), higher database load
+- **500ms**: Reduce database queries by 80%, acceptable for non-real-time workloads
+
+**Monitoring Metrics:**
+```go
+hooks := &core.Hooks{
+    OnBatchPublishComplete: func(ctx context.Context, successCount, failCount int, duration time.Duration) {
+        metrics.RecordHistogram("batch.publish.duration", duration)
+        metrics.RecordGauge("batch.publish.success_rate", float64(successCount)/(successCount+failCount))
+    },
+}
+```
+
+**Database Optimization:**
+```sql
+-- Ensure critical indexes exist
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_status_created_at
+ON outbox(status, created_at) WHERE status IN ('ENQUEUED', 'FAILED');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_status_next_retry_at
+ON outbox(status, next_retry_at) WHERE status = 'FAILED';
+
+-- Monitor table bloat
+SELECT schemaname, tablename,
+       pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+FROM pg_tables
+WHERE tablename = 'outbox';
+```
+
 ## License
 
 MIT
