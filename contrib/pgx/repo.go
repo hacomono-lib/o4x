@@ -1,0 +1,531 @@
+package pgx
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/hacomono-lib/o4x/core"
+)
+
+// SQL query templates
+// %s placeholder is used for table name (validated during repository initialization)
+const (
+	queryInsert = `
+		INSERT INTO %s (id, topic, payload, idempotency_key, status, max_retries)
+		VALUES ($1, $2, $3, $4, 'ENQUEUED', $5)
+		RETURNING id, topic, payload, idempotency_key, status, error_message,
+		          retry_count, max_retries, created_at, updated_at`
+
+	queryFetchAndLockToPublishing = `
+		WITH locked AS (
+			SELECT id
+			FROM %s
+			WHERE status = 'ENQUEUED'
+			ORDER BY created_at ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		), updated AS (
+			UPDATE %s
+			SET status = 'PUBLISHING', updated_at = now()
+			FROM locked
+			WHERE %s.id = locked.id
+			RETURNING %s.id, %s.topic, %s.payload, %s.idempotency_key,
+			          %s.status, %s.error_message, %s.retry_count,
+			          %s.max_retries, %s.created_at, %s.updated_at
+		)
+		SELECT * FROM updated`
+
+	queryUpdateToPublished = `
+		UPDATE %s
+		SET status = 'PUBLISHED', updated_at = now()
+		WHERE id = $1 AND status = 'PUBLISHING'`
+
+	queryUpdateToFailed = `
+		UPDATE %s
+		SET status = 'FAILED',
+		    error_message = $2,
+		    retry_count = retry_count + 1,
+		    next_retry_at = now() + (
+		        LEAST(
+		            $3::interval * POWER(2, retry_count + 1),
+		            $4::interval
+		        ) * (0.5 + random() * 0.5)
+		    ),
+		    updated_at = now()
+		WHERE id = $1 AND status = 'PUBLISHING'`
+
+	queryUpdateToDead = `
+		UPDATE %s
+		SET status = 'DEAD',
+		    error_message = $2,
+		    updated_at = now()
+		WHERE id = $1 AND status = 'PUBLISHING'`
+
+	queryRequeueFailed = `
+		UPDATE %s
+		SET status = 'ENQUEUED', updated_at = now()
+		WHERE status = 'FAILED'
+		  AND retry_count < max_retries
+		  AND next_retry_at IS NOT NULL
+		  AND next_retry_at <= now()`
+
+	queryGetByID = `
+		SELECT id, topic, payload, idempotency_key, status, error_message,
+		       retry_count, max_retries, next_retry_at, created_at, updated_at
+		FROM %s
+		WHERE id = $1`
+
+	queryGetByIdempotencyKey = `
+		SELECT id, topic, payload, idempotency_key, status, error_message,
+		       retry_count, max_retries, next_retry_at, created_at, updated_at
+		FROM %s
+		WHERE topic = $1 AND idempotency_key = $2`
+
+	queryReviveStuckPublishing = `
+		UPDATE %s
+		SET status = 'FAILED',
+		    error_message = 'revived from PUBLISHING (crash recovery)',
+		    retry_count = retry_count + 1,
+		    next_retry_at = now() + (
+		        LEAST(
+		            $1::interval * POWER(2, retry_count + 1),
+		            $2::interval
+		        ) * (0.5 + random() * 0.5)
+		    ),
+		    updated_at = now()
+		WHERE status = 'PUBLISHING'
+		  AND updated_at < now() - interval '5 minutes'`
+
+	queryFetchLockAndMarkPublishing = `
+		WITH locked AS (
+			SELECT id
+			FROM %s
+			WHERE status = 'ENQUEUED'
+			ORDER BY created_at ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		), updated AS (
+			UPDATE %s
+			SET status = 'PUBLISHING', updated_at = now()
+			FROM locked
+			WHERE %s.id = locked.id
+			RETURNING %s.id, %s.topic, %s.payload, %s.idempotency_key,
+			          %s.status, %s.error_message, %s.retry_count,
+			          %s.max_retries, %s.created_at, %s.updated_at
+		)
+		SELECT * FROM updated`
+
+	queryUpdateBatchToPublished = `
+		UPDATE %s
+		SET status = 'PUBLISHED', updated_at = now()
+		WHERE id = ANY($1) AND status = 'PUBLISHING'`
+
+	queryDeleteOlderThan = `
+		DELETE FROM %s
+		WHERE status = $1
+		  AND updated_at < now() - $2::interval`
+)
+
+// querier is an interface that both pgxpool.Pool and pgx.Tx implement
+type querier interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// OutboxRepository implements core.OutboxRepository for PostgreSQL using pgx
+type OutboxRepository struct {
+	pool        *pgxpool.Pool
+	q           querier // either pool or tx
+	tableName   string
+	backoffBase time.Duration
+	backoffMax  time.Duration
+}
+
+// NewOutboxRepository creates a new PostgreSQL outbox repository
+func NewOutboxRepository(pool *pgxpool.Pool, opts ...Option) *OutboxRepository {
+	cfg := applyOptions(opts...)
+
+	// Validate table name to prevent SQL injection
+	if err := core.ValidateTableName(cfg.OutboxTableName); err != nil {
+		panic(fmt.Sprintf("invalid outbox table name %q: %v", cfg.OutboxTableName, err))
+	}
+
+	return &OutboxRepository{
+		pool:        pool,
+		q:           pool,
+		tableName:   cfg.OutboxTableName,
+		backoffBase: cfg.RequeueBackoffBase,
+		backoffMax:  cfg.RequeueBackoffMax,
+	}
+}
+
+// WithTx returns a new OutboxRepository that uses the given transaction.
+// Use this to insert outbox messages within an application transaction.
+//
+// Example:
+//
+//	tx, _ := pool.Begin(ctx)
+//	defer tx.Rollback(ctx)
+//
+//	// Business logic
+//	_, err := tx.Exec(ctx, "INSERT INTO orders ...")
+//
+//	// Insert outbox in same transaction
+//	txRepo := repo.WithTx(tx)
+//	txRepo.Insert(ctx, params)
+//
+//	tx.Commit(ctx)
+func (r *OutboxRepository) WithTx(tx pgx.Tx) *OutboxRepository {
+	return &OutboxRepository{
+		pool:        r.pool,
+		q:           tx,
+		tableName:   r.tableName,
+		backoffBase: r.backoffBase,
+		backoffMax:  r.backoffMax,
+	}
+}
+
+// Insert adds a new message to the outbox with ENQUEUED status
+func (r *OutboxRepository) Insert(ctx context.Context, params core.OutboxInsertParams) (*core.Outbox, error) {
+	id := core.GenerateID()
+	query := fmt.Sprintf(queryInsert, r.tableName)
+
+	var outbox core.Outbox
+	var errMsg sql.NullString
+
+	err := r.q.QueryRow(ctx, query,
+		id,
+		params.Topic,
+		params.Payload,
+		params.IdempotencyKey,
+		params.MaxRetries,
+	).Scan(
+		&outbox.ID,
+		&outbox.Topic,
+		&outbox.Payload,
+		&outbox.IdempotencyKey,
+		&outbox.Status,
+		&errMsg,
+		&outbox.RetryCount,
+		&outbox.MaxRetries,
+		&outbox.CreatedAt,
+		&outbox.UpdatedAt,
+	)
+	if err != nil {
+		// Check for unique constraint violation (idempotency_key duplicate)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+			return nil, core.ErrAlreadyExists
+		}
+		return nil, err
+	}
+
+	if errMsg.Valid {
+		outbox.ErrorMessage = &errMsg.String
+	}
+
+	return &outbox, nil
+}
+
+// FetchAndLockToPublishing atomically fetches one ENQUEUED message,
+// locks it, and updates its status to PUBLISHING in a single SQL statement.
+// Uses SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1 with atomic CTE update
+// to ensure the operation is atomic and prevents race conditions.
+func (r *OutboxRepository) FetchAndLockToPublishing(ctx context.Context) (*core.Outbox, error) {
+	query := fmt.Sprintf(queryFetchAndLockToPublishing,
+		r.tableName, r.tableName, r.tableName, r.tableName, r.tableName,
+		r.tableName, r.tableName, r.tableName, r.tableName, r.tableName,
+		r.tableName, r.tableName, r.tableName)
+
+	var outbox core.Outbox
+	var errMsg sql.NullString
+
+	err := r.q.QueryRow(ctx, query).Scan(
+		&outbox.ID,
+		&outbox.Topic,
+		&outbox.Payload,
+		&outbox.IdempotencyKey,
+		&outbox.Status,
+		&errMsg,
+		&outbox.RetryCount,
+		&outbox.MaxRetries,
+		&outbox.CreatedAt,
+		&outbox.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrNoMessage
+		}
+		return nil, err
+	}
+
+	if errMsg.Valid {
+		outbox.ErrorMessage = &errMsg.String
+	}
+
+	return &outbox, nil
+}
+
+// UpdateToPublished marks the message as PUBLISHED
+// Only updates messages in PUBLISHING state to prevent invalid state transitions
+func (r *OutboxRepository) UpdateToPublished(ctx context.Context, id string) error {
+	query := fmt.Sprintf(queryUpdateToPublished, r.tableName)
+	result, err := r.q.Exec(ctx, query, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("%w: expected PUBLISHING status for message %s", core.ErrInvalidStatus, id)
+	}
+	return nil
+}
+
+// UpdateToFailed marks the message as FAILED with error info
+// Only updates messages in PUBLISHING state to prevent invalid state transitions
+// Increments retry_count and sets next_retry_at based on exponential backoff
+// FIXED: Calculates next_retry_at in PostgreSQL to avoid data race
+func (r *OutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg string) error {
+	// Calculate backoff in PostgreSQL for atomicity
+	// Formula: now() + (backoffBase * 2^(retry_count + 1)), capped at backoffMax
+	// Note: We use retry_count + 1 because retry_count will be incremented
+	query := fmt.Sprintf(queryUpdateToFailed, r.tableName)
+
+	result, err := r.q.Exec(ctx, query, id, errMsg, r.backoffBase, r.backoffMax)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("%w: expected PUBLISHING status for message %s", core.ErrInvalidStatus, id)
+	}
+	return nil
+}
+
+// UpdateToDead marks the message as DEAD
+// Only updates messages in PUBLISHING state to prevent invalid state transitions
+func (r *OutboxRepository) UpdateToDead(ctx context.Context, id, errMsg string) error {
+	query := fmt.Sprintf(queryUpdateToDead, r.tableName)
+	result, err := r.q.Exec(ctx, query, id, errMsg)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("%w: expected PUBLISHING status for message %s", core.ErrInvalidStatus, id)
+	}
+	return nil
+}
+
+// RequeueFailed moves FAILED messages back to ENQUEUED.
+// Only messages whose next_retry_at has elapsed are requeued.
+// Returns the number of messages requeued.
+// FIXED: Removed unnecessary SKIP LOCKED - no lock contention with FetchAndLockToPublishing
+// since it only targets ENQUEUED messages, not FAILED ones.
+func (r *OutboxRepository) RequeueFailed(ctx context.Context) (int64, error) {
+	query := fmt.Sprintf(queryRequeueFailed, r.tableName)
+
+	result, err := r.q.Exec(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+// GetByID retrieves an outbox message by ID
+func (r *OutboxRepository) GetByID(ctx context.Context, id string) (*core.Outbox, error) {
+	query := fmt.Sprintf(queryGetByID, r.tableName)
+
+	var outbox core.Outbox
+	var errMsg sql.NullString
+	var nextRetryAt sql.NullTime
+
+	err := r.q.QueryRow(ctx, query, id).Scan(
+		&outbox.ID,
+		&outbox.Topic,
+		&outbox.Payload,
+		&outbox.IdempotencyKey,
+		&outbox.Status,
+		&errMsg,
+		&outbox.RetryCount,
+		&outbox.MaxRetries,
+		&nextRetryAt,
+		&outbox.CreatedAt,
+		&outbox.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrNotFound
+		}
+		return nil, err
+	}
+
+	if errMsg.Valid {
+		outbox.ErrorMessage = &errMsg.String
+	}
+	if nextRetryAt.Valid {
+		outbox.NextRetryAt = &nextRetryAt.Time
+	}
+
+	return &outbox, nil
+}
+
+// GetByIdempotencyKey retrieves an outbox message by topic and idempotency key
+func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, topic, idempotencyKey string) (*core.Outbox, error) {
+	query := fmt.Sprintf(queryGetByIdempotencyKey, r.tableName)
+
+	var outbox core.Outbox
+	var errMsg sql.NullString
+	var nextRetryAt sql.NullTime
+
+	err := r.q.QueryRow(ctx, query, topic, idempotencyKey).Scan(
+		&outbox.ID,
+		&outbox.Topic,
+		&outbox.Payload,
+		&outbox.IdempotencyKey,
+		&outbox.Status,
+		&errMsg,
+		&outbox.RetryCount,
+		&outbox.MaxRetries,
+		&nextRetryAt,
+		&outbox.CreatedAt,
+		&outbox.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrNotFound
+		}
+		return nil, err
+	}
+
+	if errMsg.Valid {
+		outbox.ErrorMessage = &errMsg.String
+	}
+	if nextRetryAt.Valid {
+		outbox.NextRetryAt = &nextRetryAt.Time
+	}
+
+	return &outbox, nil
+}
+
+// InsertOutboxJSON is a helper to insert with a Go struct as payload
+func (r *OutboxRepository) InsertOutboxJSON(ctx context.Context, topic string, payload any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.Insert(ctx, core.OutboxInsertParams{
+		Topic:          topic,
+		Payload:        data,
+		IdempotencyKey: idempotencyKey,
+		MaxRetries:     maxRetries,
+	})
+}
+
+// ReviveStuckPublishing recovers messages stuck in PUBLISHING state.
+// This should be called once at startup to recover from crashes.
+// PUBLISHING -> FAILED (will be retried by RequeueFailed)
+//
+// Only revives messages that have been in PUBLISHING state for more than 5 minutes,
+// preventing recovery of messages actively being processed.
+//
+// Note: retry_count is incremented to ensure max_retries limit is enforced.
+// This prevents infinite retries for messages that consistently fail.
+// Messages exceeding max_retries will be moved to DEAD on next retry attempt.
+func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
+	query := fmt.Sprintf(queryReviveStuckPublishing, r.tableName)
+	result, err := r.q.Exec(ctx, query, r.backoffBase, r.backoffMax)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+// FetchLockAndMarkPublishing atomically fetches ENQUEUED messages,
+// locks them, and updates their status to PUBLISHING in a single SQL statement.
+// This uses a CTE to ensure the operation is atomic and prevents race conditions.
+// Implements core.BatchOutboxRepository
+func (r *OutboxRepository) FetchLockAndMarkPublishing(ctx context.Context, limit int) ([]*core.Outbox, error) {
+	// Use CTE to atomically lock and update in a single query
+	query := fmt.Sprintf(queryFetchLockAndMarkPublishing,
+		r.tableName, r.tableName, r.tableName, r.tableName, r.tableName,
+		r.tableName, r.tableName, r.tableName, r.tableName, r.tableName,
+		r.tableName, r.tableName, r.tableName)
+
+	rows, err := r.q.Query(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*core.Outbox
+	for rows.Next() {
+		var outbox core.Outbox
+		var errMsg sql.NullString
+
+		err := rows.Scan(
+			&outbox.ID,
+			&outbox.Topic,
+			&outbox.Payload,
+			&outbox.IdempotencyKey,
+			&outbox.Status,
+			&errMsg,
+			&outbox.RetryCount,
+			&outbox.MaxRetries,
+			&outbox.CreatedAt,
+			&outbox.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if errMsg.Valid {
+			outbox.ErrorMessage = &errMsg.String
+		}
+
+		results = append(results, &outbox)
+	}
+
+	return results, rows.Err()
+}
+
+// UpdateBatchToPublished marks multiple messages as PUBLISHED
+// Implements core.BatchOutboxRepository
+// Returns the number of successfully updated messages.
+// Partial success is allowed - only messages in PUBLISHING state will be updated.
+func (r *OutboxRepository) UpdateBatchToPublished(ctx context.Context, ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	query := fmt.Sprintf(queryUpdateBatchToPublished, r.tableName)
+
+	result, err := r.q.Exec(ctx, query, ids)
+	if err != nil {
+		return 0, err
+	}
+
+	return result.RowsAffected(), nil
+}
+
+// DeleteOlderThan deletes outbox records with the given status older than the specified duration.
+// Implements core.OutboxCleaner
+func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, status core.OutboxStatus, olderThan time.Duration) (int64, error) {
+	query := fmt.Sprintf(queryDeleteOlderThan, r.tableName)
+
+	// Convert Go duration to PostgreSQL interval format (e.g., "3600 seconds")
+	intervalStr := fmt.Sprintf("%d seconds", int64(olderThan.Seconds()))
+
+	result, err := r.q.Exec(ctx, query, string(status), intervalStr)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

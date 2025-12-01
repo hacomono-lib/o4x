@@ -1,0 +1,92 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+coverage.html
+coverage.out
+*.out
+
+# Go workspace file
+go.work
+
+# Build artifacts
+/cmd/o4x-schema/o4x-schema
+/examples/local/cmd/enqueue/enqueue
+/examples/local/cmd/dispatcher/dispatcher
+/examples/local/cmd/consumer/consumer
+
+# IDE - VSCode
+.vscode/
+*.code-workspace
+
+# IDE - JetBrains
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# IDE - Vim
+*.swp
+*.swo
+*~
+
+# OS - macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# OS - Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# OS - Linux
+*~
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.log
+*.tmp
+tmp/
+temp/
+
+# Vendor directory (if using)
+vendor/
+
+# Go module cache (local development)
+# Note: Usually .cache is in GOPATH, but just in case
+.cache/
+
+# Test results
+test-results/
+*.xml
+
+# Debug files
+debug
+debug.test
+__debug_bin
+
+# Documentation build artifacts
+/docs/.build/
+/docs/_build/
+
+# Local development databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local development infrastructure
+.localstack/
+docker-compose.override.yml
