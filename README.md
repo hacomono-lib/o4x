@@ -46,7 +46,7 @@ flowchart LR
     end
 
     subgraph Message Broker
-        SQS[SQS FIFO]
+        SQS[SQS]
     end
 
     subgraph Consumer Side

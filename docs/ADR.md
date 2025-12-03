@@ -6,7 +6,7 @@ This document records the key architectural decisions made during the developmen
 
 1. [ADR-001: Use PostgreSQL as the Primary Storage](#adr-001-use-postgresql-as-the-primary-storage)
 2. [ADR-002: Adopt UUID v7 for Outbox IDs](#adr-002-adopt-uuid-v7-for-outbox-ids)
-3. [ADR-003: Use SQS FIFO Queues](#adr-003-use-sqs-fifo-queues)
+3. [ADR-003: Support Both SQS Standard and FIFO Queues](#adr-003-support-both-sqs-standard-and-fifo-queues)
 4. [ADR-004: Guarantee At-Least-Once Delivery](#adr-004-guarantee-at-least-once-delivery)
 5. [ADR-005: Separate Outbox and Consumer State Machines](#adr-005-separate-outbox-and-consumer-state-machines)
 6. [ADR-006: Pluggable Repository Pattern](#adr-006-pluggable-repository-pattern)
@@ -64,31 +64,42 @@ We use UUID v7 (RFC 9562) for outbox IDs, which embeds timestamp information.
 
 ---
 
-## ADR-003: Use SQS FIFO Queues
+## ADR-003: Support Both SQS Standard and FIFO Queues
 
-**Status**: Accepted
+**Status**: Accepted (Revised)
 
 **Context**:
-- Messages need ordering guarantees per topic (e.g., order.created events must be processed in order)
-- Duplicate messages waste processing resources and can cause issues
-- SQS offers both Standard (no ordering) and FIFO (ordered + deduplicated) queues
+- SQS offers both Standard (high throughput) and FIFO (ordered + deduplicated) queues
+- Different workloads have different requirements:
+  - Some need strict ordering guarantees (e.g., order state changes)
+  - Others prioritize throughput over ordering (e.g., notifications, analytics events)
+- Forcing FIFO-only would unnecessarily limit throughput and increase costs for order-insensitive workloads
 
 **Decision**:
-o4x is designed for SQS FIFO queues with:
-- `MessageGroupId` = topic (ordering per topic)
-- `MessageDeduplicationId` = idempotency_key (deduplication)
+o4x supports both SQS Standard and FIFO queues. Users choose based on their requirements:
+
+- **Standard Queue**: Default choice for high-throughput, order-insensitive workloads
+- **FIFO Queue**: Use when ordering or deduplication is required
+  - `MessageGroupId` = topic (ordering per topic)
+  - `MessageDeduplicationId` = idempotency_key (deduplication)
 
 **Consequences**:
-- ✅ **Ordering guarantee**: Messages within same topic are processed in order
-- ✅ **Built-in deduplication**: SQS prevents duplicates within 5-minute window
-- ✅ **Topic isolation**: Different topics don't block each other
-- ⚠️ **Throughput limit**: FIFO queues have lower throughput than Standard queues (300 TPS per message group)
-- ⚠️ **Cost**: FIFO queues cost slightly more than Standard queues
-- 🔮 Future: Consider supporting Standard queues for high-throughput, order-insensitive workloads
+- ✅ **Flexibility**: Users choose the queue type that fits their use case
+- ✅ **Higher throughput**: Standard queues have no TPS limits
+- ✅ **Lower cost**: Standard queues are cheaper than FIFO
+- ✅ **Ordering when needed**: FIFO queues available for order-sensitive workloads
+- ⚠️ **Application responsibility**: Standard queues require idempotent handlers (no built-in deduplication)
+- ⚠️ **No ordering with Standard**: Messages may arrive out of order
+
+**When to Use Each**:
+| Queue Type | Use When |
+|------------|----------|
+| Standard | High throughput needed, order doesn't matter, cost-sensitive |
+| FIFO | Strict ordering required, need built-in deduplication, <300 TPS per group is acceptable |
 
 **Alternatives Considered**:
-- **SQS Standard**: No ordering guarantee, but higher throughput. Rejected because ordering is critical for most event-driven systems.
-- **Kafka**: Better throughput and ordering, but requires self-hosting and more operational overhead.
+- **FIFO-only**: Simpler but limits throughput (300 TPS per message group) and increases cost
+- **Kafka**: Better throughput and ordering, but requires self-hosting and more operational overhead
 
 ---
 
