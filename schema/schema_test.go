@@ -1,7 +1,6 @@
 package schema
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,7 +73,7 @@ func (s *SchemaSuite) TestConsumerMessagesDDL_GeneratesCorrectSchema() {
 	tableName := "consumer_messages"
 
 	// Act
-	ddl := ConsumerMessagesDDL(tableName, "")
+	ddl := ConsumerMessagesDDL(tableName)
 
 	// Assert
 	// Check ENUM type
@@ -103,41 +102,34 @@ func (s *SchemaSuite) TestConsumerMessagesDDL_GeneratesCorrectSchema() {
 	// Check unique constraint
 	assert.Contains(s.T(), ddl, "ADD CONSTRAINT uq_consumer_messages_message_id UNIQUE (message_id)")
 
-	// Check index
+	// Check status index
 	assert.Contains(s.T(), ddl, "CREATE INDEX idx_consumer_messages_status ON consumer_messages (status)")
 
-	// No FK constraint without outbox table
+	// Check outbox_id index (no FK constraint, just index for correlation queries)
+	assert.Contains(s.T(), ddl, "CREATE INDEX idx_consumer_messages_outbox_id ON consumer_messages (outbox_id)")
+	assert.Contains(s.T(), ddl, "WHERE outbox_id IS NOT NULL")
+
+	// No FK constraint (independent lifecycles)
 	assert.NotContains(s.T(), ddl, "FOREIGN KEY")
+	assert.NotContains(s.T(), ddl, "REFERENCES")
 }
 
-func (s *SchemaSuite) TestConsumerMessagesDDL_WithForeignKey() {
-	// Arrange
-	tableName := "consumer_messages"
-	outboxTableName := "outbox"
-
-	// Act
-	ddl := ConsumerMessagesDDL(tableName, outboxTableName)
-
-	// Assert
-	assert.Contains(s.T(), ddl, "CONSTRAINT fk_consumer_messages_outbox FOREIGN KEY (outbox_id)")
-	assert.Contains(s.T(), ddl, "REFERENCES outbox (id) ON DELETE SET NULL")
-}
-
-func (s *SchemaSuite) TestConsumerMessagesDDL_WithCustomTableNames() {
+func (s *SchemaSuite) TestConsumerMessagesDDL_WithCustomTableName() {
 	// Arrange
 	tableName := "my_consumer"
-	outboxTableName := "my_outbox"
 
 	// Act
-	ddl := ConsumerMessagesDDL(tableName, outboxTableName)
+	ddl := ConsumerMessagesDDL(tableName)
 
 	// Assert
 	assert.Contains(s.T(), ddl, "CREATE TYPE my_consumer_status AS ENUM")
 	assert.Contains(s.T(), ddl, "CREATE TABLE my_consumer")
-	assert.Contains(s.T(), ddl, "fk_my_consumer_outbox")
-	assert.Contains(s.T(), ddl, "REFERENCES my_outbox")
 	assert.Contains(s.T(), ddl, "uq_my_consumer_message_id")
 	assert.Contains(s.T(), ddl, "idx_my_consumer_status")
+	assert.Contains(s.T(), ddl, "idx_my_consumer_outbox_id")
+
+	// No FK constraint
+	assert.NotContains(s.T(), ddl, "FOREIGN KEY")
 }
 
 func (s *SchemaSuite) TestDropOutboxDDL_GeneratesCorrectStatements() {
@@ -189,9 +181,12 @@ func (s *SchemaSuite) TestMigrationSQL_GeneratesCompleteMigration() {
 	assert.Contains(s.T(), sql, "CREATE TYPE consumer_messages_status AS ENUM")
 	assert.Contains(s.T(), sql, "CREATE TABLE consumer_messages")
 
-	// Check FK is created (since outbox table is provided)
-	assert.Contains(s.T(), sql, "fk_consumer_messages_outbox")
-	assert.Contains(s.T(), sql, "REFERENCES outbox")
+	// Check outbox_id index is created
+	assert.Contains(s.T(), sql, "idx_consumer_messages_outbox_id")
+
+	// No FK constraint (independent lifecycles)
+	assert.NotContains(s.T(), sql, "FOREIGN KEY")
+	assert.NotContains(s.T(), sql, "REFERENCES outbox")
 }
 
 func (s *SchemaSuite) TestRollbackSQL_GeneratesCorrectRollback() {
@@ -211,12 +206,7 @@ func (s *SchemaSuite) TestRollbackSQL_GeneratesCorrectRollback() {
 	assert.Contains(s.T(), sql, "BEGIN;")
 	assert.Contains(s.T(), sql, "COMMIT;")
 
-	// Check consumer is dropped before outbox (FK dependency)
-	consumerDropIdx := strings.Index(sql, "DROP TABLE IF EXISTS consumer_messages")
-	outboxDropIdx := strings.Index(sql, "DROP TABLE IF EXISTS outbox")
-	assert.Greater(s.T(), outboxDropIdx, consumerDropIdx, "consumer should be dropped before outbox due to FK")
-
-	// Check both tables and types are dropped
+	// Check both tables and types are dropped (order doesn't matter without FK)
 	assert.Contains(s.T(), sql, "DROP TABLE IF EXISTS consumer_messages;")
 	assert.Contains(s.T(), sql, "DROP TYPE IF EXISTS consumer_messages_status;")
 	assert.Contains(s.T(), sql, "DROP TABLE IF EXISTS outbox;")
@@ -236,5 +226,8 @@ func (s *SchemaSuite) TestMigrationSQL_WithCustomTableNames() {
 	assert.Contains(s.T(), sql, "CREATE TABLE my_consumer")
 	assert.Contains(s.T(), sql, "CREATE TYPE my_outbox_status AS ENUM")
 	assert.Contains(s.T(), sql, "CREATE TYPE my_consumer_status AS ENUM")
-	assert.Contains(s.T(), sql, "REFERENCES my_outbox")
+	assert.Contains(s.T(), sql, "idx_my_consumer_outbox_id")
+
+	// No FK constraint
+	assert.NotContains(s.T(), sql, "REFERENCES my_outbox")
 }

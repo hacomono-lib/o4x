@@ -1,8 +1,8 @@
+version: '3.8'
+
 services:
   postgres:
-    build:
-      context: ../..
-      dockerfile: examples/local/Dockerfile.postgres
+    image: postgres:17-alpine
     container_name: o4x-postgres
     environment:
       POSTGRES_USER: postgres
@@ -11,8 +11,8 @@ services:
     ports:
       - "15432:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -20,23 +20,23 @@ services:
       retries: 5
 
   localstack:
-    image: localstack/localstack:3.0
+    image: localstack/localstack:latest
     container_name: o4x-localstack
-    environment:
-      SERVICES: sqs
-      DEBUG: 1
-      AWS_DEFAULT_REGION: us-east-1
     ports:
       - "14566:4566"
+    environment:
+      SERVICES: sqs
+      DEFAULT_REGION: us-east-1
+      DEBUG: 1
     volumes:
-      - localstack-data:/var/lib/localstack
-      - ./init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
+      - localstack_data:/var/lib/localstack
+      - ./scripts/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
     healthcheck:
-      test: ["CMD-SHELL", "awslocal sqs list-queues"]
+      test: ["CMD", "awslocal", "sqs", "list-queues"]
       interval: 5s
       timeout: 5s
       retries: 10
 
 volumes:
-  postgres-data:
-  localstack-data:
+  postgres_data:
+  localstack_data:

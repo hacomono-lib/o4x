@@ -21,6 +21,5 @@ RUN echo "-- Create test database for integration tests" > /init-test-db.sql && 
 
 FROM postgres:17-alpine
 COPY --from=builder /schema.sql /docker-entrypoint-initdb.d/01_schema.sql
-COPY --from=builder /init-test-db.sql /docker-entrypoint-initdb.d/03_init_test_db.sql
-COPY examples/local/seed.sql /docker-entrypoint-initdb.d/02_seed.sql
+COPY --from=builder /init-test-db.sql /docker-entrypoint-initdb.d/02_init_test_db.sql
 RUN chmod 644 /docker-entrypoint-initdb.d/*

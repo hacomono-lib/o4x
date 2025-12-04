@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -24,6 +25,23 @@ type ServiceConfig struct {
 	VisibilityTimeout   int32
 	MaxRetries          int
 	WorkerCount         int
+	// MessageConcurrency controls how many messages are processed concurrently
+	// within a single worker goroutine.
+	//
+	// - 0 or 1: Sequential processing (default, safe for all queue types)
+	// - >1: Parallel processing (recommended for Standard queues only)
+	//
+	// Example:
+	//   WorkerCount=5, MessageConcurrency=10
+	//   → Up to 5*10=50 messages processed in parallel
+	//
+	// IMPORTANT: MessageConcurrency>1 is NOT compatible with FIFO queues
+	// (queues ending with .fifo suffix), as it breaks message ordering guarantees.
+	// NewService will return an error if MessageConcurrency>1 is used with a FIFO queue.
+	//
+	// Performance tip: For Standard queues with fast handlers (<100ms),
+	// MessageConcurrency can significantly improve throughput.
+	MessageConcurrency int
 	// ShutdownTimeout is the time to wait for graceful shutdown before warning
 	ShutdownTimeout time.Duration
 	// ForceTimeout is the hard limit after which the process exits forcefully
@@ -48,11 +66,18 @@ func DefaultServiceConfig(queueURL string) ServiceConfig {
 		VisibilityTimeout:   30,
 		MaxRetries:          5,
 		WorkerCount:         1,
+		MessageConcurrency:  1, // Sequential processing by default
 		ShutdownTimeout:     30 * time.Second,
 		ForceTimeout:        60 * time.Second,
 		OnForceShutdown:     func() { os.Exit(1) },
 		Logger:              slog.Default(),
 	}
+}
+
+// isFIFO returns true if the queue URL indicates a FIFO queue.
+// FIFO queue names must end with the .fifo suffix.
+func isFIFO(queueURL string) bool {
+	return len(queueURL) >= 5 && queueURL[len(queueURL)-5:] == ".fifo"
 }
 
 // Service is the main consumer service that polls SQS and processes messages
@@ -111,6 +136,9 @@ func NewService(sqsClient SQSClient, repo Repository, handler Handler, config Se
 	if config.OnForceShutdown == nil {
 		config.OnForceShutdown = func() { os.Exit(1) }
 	}
+	if config.MessageConcurrency == 0 {
+		config.MessageConcurrency = 1
+	}
 
 	// Use NopRepository if repo is nil (Null Object Pattern)
 	if repo == nil {
@@ -127,6 +155,11 @@ func NewService(sqsClient SQSClient, repo Repository, handler Handler, config Se
 
 // Start begins the consumer service
 func (s *Service) Start(ctx context.Context) error {
+	// Validate configuration
+	if s.config.MessageConcurrency > 1 && isFIFO(s.config.QueueURL) {
+		return fmt.Errorf("MessageConcurrency>1 is not compatible with FIFO queues (queue: %s): parallel processing breaks message ordering guarantees", s.config.QueueURL)
+	}
+
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
@@ -257,14 +290,53 @@ func (s *Service) pollAndProcess(ctx context.Context, logger *slog.Logger) {
 		return
 	}
 
-	for _, sqsMsg := range output.Messages {
-		// Check context before processing each message
-		if ctx.Err() != nil {
-			logger.DebugContext(ctx, "skipping message processing due to shutdown")
-			return
+	// Sequential processing (default, safe for all queue types)
+	if s.config.MessageConcurrency <= 1 {
+		for _, sqsMsg := range output.Messages {
+			// Check context before processing each message
+			if ctx.Err() != nil {
+				logger.DebugContext(ctx, "skipping message processing due to shutdown")
+				return
+			}
+			s.processMessage(ctx, sqsMsg, logger)
 		}
-		s.processMessage(ctx, sqsMsg, logger)
+		return
 	}
+
+	// Parallel processing (for Standard queues only)
+	// Use semaphore pattern to limit concurrency
+	sem := make(chan struct{}, s.config.MessageConcurrency)
+	var wg sync.WaitGroup
+
+messageLoop:
+	for _, sqsMsg := range output.Messages {
+		// Check context before starting goroutine
+		if ctx.Err() != nil {
+			logger.DebugContext(ctx, "skipping remaining messages due to shutdown")
+			break
+		}
+
+		// Acquire semaphore
+		select {
+		case sem <- struct{}{}:
+			// Semaphore acquired
+		case <-ctx.Done():
+			// Context cancelled while waiting for semaphore
+			logger.DebugContext(ctx, "shutdown during semaphore acquisition")
+			break messageLoop
+		}
+
+		wg.Add(1)
+		go func(msg sqstypes.Message) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release semaphore
+
+			s.processMessage(ctx, msg, logger)
+		}(sqsMsg)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
 }
 
 // processMessage processes a single SQS message.

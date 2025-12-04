@@ -38,9 +38,9 @@ go run cmd/o4x-schema/main.go --outbox my_outbox  # Custom table name
 go run cmd/o4x-schema/main.go --rollback          # Generate rollback SQL
 
 # Run examples (requires local infrastructure)
-go run examples/local/cmd/dispatcher/main.go
-go run examples/local/cmd/consumer/main.go
-go run examples/local/cmd/enqueue/main.go -topic order.created -key order-123 -payload '{"order_id":"123"}'
+go run examples/app/cmd/dispatcher/main.go
+go run examples/app/cmd/consumer/main.go
+go run examples/app/cmd/api/main.go
 ```
 
 ## Architecture
@@ -236,7 +236,7 @@ status.IsStale(5 * time.Minute)  // no messages processed in 5min
 **Implementation**:
 - `/health` endpoint - liveness probe (restart trigger)
 - `/ready` endpoint - readiness probe (traffic routing)
-- See `examples/local/cmd/dispatcher/main.go` for full example
+- See `examples/app/cmd/dispatcher/main.go` for full example
 
 ### Idempotency Implementation
 
@@ -307,3 +307,63 @@ service := consumer.NewService(sqsClient, nil, handler, config)
 3. Set appropriate TTLs (Redis: 10-30min, cleanup: CONSUMED 7d, DEAD 30d)
 4. Use DB transactions for multi-step operations
 5. Monitor duplicate rates and alert on anomalies
+
+### MessageConcurrency (Parallel Processing within Workers)
+
+The consumer supports parallel message processing within each worker via `MessageConcurrency` config:
+
+```go
+service := consumer.NewService(sqsClient, repo, handler, consumer.ServiceConfig{
+    QueueURL:           queueURL,
+    WorkerCount:        5,
+    MessageConcurrency: 10, // Process 10 messages concurrently per worker
+})
+```
+
+**Key Concepts**:
+- **Sequential** (MessageConcurrency=1): Default, safe for all queue types
+- **Parallel** (MessageConcurrency>1): Only for Standard queues, NOT FIFO
+- **Total parallelism**: `WorkerCount * MessageConcurrency` (e.g., 5 * 10 = 50 concurrent messages)
+- **FIFO validation**: Service.Start() returns error if MessageConcurrency>1 with FIFO queue (detected via `.fifo` suffix)
+
+**Implementation Details**:
+- Sequential path: Simple for loop over messages (existing behavior)
+- Parallel path: Semaphore (buffered channel) + sync.WaitGroup pattern
+- Graceful shutdown: Context cancellation checked before starting each goroutine
+- Labeled break: Properly exits loop when context cancelled during semaphore acquisition
+
+**When to Use**:
+- **Standard queues only** (FIFO requires MessageConcurrency=1 for ordering)
+- Fast handlers (<100ms processing time)
+- High throughput requirements (>1000 msg/sec)
+- I/O-bound operations (DB queries, HTTP calls)
+
+**Performance Tuning**:
+```go
+// Low throughput, ordered processing (FIFO)
+WorkerCount:        2
+MessageConcurrency: 1  // Must be 1 for FIFO
+
+// Moderate throughput (Standard)
+WorkerCount:        5
+MessageConcurrency: 5  // 25 concurrent messages
+
+// High throughput (Standard)
+WorkerCount:        10
+MessageConcurrency: 10 // 100 concurrent messages
+```
+
+**Important Considerations**:
+1. **Database Connections**: Ensure pgxpool has sufficient connections: `maxConns >= WorkerCount * MessageConcurrency + margin`
+2. **Memory**: Each goroutine consumes memory (handler state + message payload)
+3. **Handler Idempotency**: Critical with parallel processing (potential out-of-order execution)
+4. **Monitoring**: Track processing time, error rates, and DB connection pool usage
+
+**Example** (see examples/app/cmd/consumer/main.go):
+```bash
+# Standard queue with parallel processing
+go run cmd/consumer/main.go --workers 5 --message-concurrency 10
+
+# FIFO queue (MessageConcurrency must be 1)
+go run cmd/consumer/main.go --fifo --workers 2 --message-concurrency 1
+```

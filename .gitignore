@@ -18,9 +18,10 @@ go.work
 
 # Build artifacts
 /cmd/o4x-schema/o4x-schema
-/examples/local/cmd/enqueue/enqueue
-/examples/local/cmd/dispatcher/dispatcher
-/examples/local/cmd/consumer/consumer
+/examples/app/cmd/api/api
+/examples/app/cmd/dispatcher/dispatcher
+/examples/app/cmd/consumer/consumer
+/examples/app/benchmark/benchmark
 
 # IDE - VSCode
 .vscode/
@@ -72,6 +73,9 @@ vendor/
 # Test results
 test-results/
 *.xml
+
+# Benchmark results
+benchmark_results/
 
 # Debug files
 debug

@@ -23,7 +23,8 @@ import (
 
 func main() {
 	// Command-line flags
-	multiQueue := flag.Bool("multi-queue", false, "Enable multi-queue routing (route different topics to different queues)")
+	multiQueue := flag.Bool("multi-queue", false, "Enable multi-queue routing")
+	workerCount := flag.Int("workers", 2, "Number of worker goroutines")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -40,7 +41,6 @@ func main() {
 	standardQueueURL := getEnv("STANDARD_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-standard")
 	awsRegion := getEnv("AWS_REGION", "us-east-1")
 	healthPort := getEnv("HEALTH_PORT", "8080")
-	workerCount := 1
 	pollInterval := 100 * time.Millisecond
 
 	// Initialize PostgreSQL connection pool
@@ -58,7 +58,7 @@ func main() {
 	}
 	logger.Info("connected to database")
 
-	// Initialize AWS SQS client (LocalStack compatible)
+	// Initialize AWS SQS client
 	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(awsRegion),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
@@ -73,7 +73,6 @@ func main() {
 	})
 
 	// Initialize repository and publisher
-	// Use WithOutboxTableName("custom_outbox") to customize table name
 	repo := pgx.NewOutboxRepository(pool)
 
 	var publisher core.Publisher
@@ -83,30 +82,32 @@ func main() {
 		logger.Info("multi-queue mode enabled")
 
 		// Create topic-to-queue router
-		// Default queue is the Standard queue (for testing)
 		router := sqspub.NewTopicQueueMap(standardQueueURL)
 
-		// Route specific order/payment topics to FIFO queue (strict ordering)
-		router.RegisterPrefix("payment.", sqsQueueURL)
+		// Route order/inventory topics to FIFO queue (strict ordering)
+		router.RegisterPrefix("order.", sqsQueueURL)
 		router.RegisterPrefix("inventory.", sqsQueueURL)
 
-		// All other topics (including order.created for testing) use Standard queue
-		// This allows us to test receive_count behavior on Standard queue
+		// Route notification topics to Standard queue (higher throughput)
+		router.RegisterPrefix("notification.", standardQueueURL)
+
+		// User events go to Standard queue (default)
 
 		logger.Info("multi-queue routing configured",
 			"default_queue", standardQueueURL,
 			"fifo_queue", sqsQueueURL,
-			"fifo_prefixes", []string{"payment.", "inventory."},
+			"fifo_prefixes", []string{"order.", "inventory."},
+			"standard_prefixes", []string{"notification."},
 		)
 
 		publisher = sqspub.NewMultiQueuePublisher(sqsClient, router)
 	} else {
-		// Single queue mode: publish all messages to one queue
+		// Single queue mode
 		logger.Info("single queue mode", "queue_url", sqsQueueURL)
 		publisher = sqspub.NewPublisher(sqsClient, sqsQueueURL)
 	}
 
-	// Revive stuck messages from previous crash (PUBLISHING -> FAILED)
+	// Revive stuck messages from previous crash
 	revived, err := repo.ReviveStuckPublishing(ctx)
 	if err != nil {
 		logger.Error("failed to revive stuck publishing messages", "error", err)
@@ -119,7 +120,7 @@ func main() {
 	// Initialize dispatcher
 	dispatcher, err := core.NewDispatcher(repo, publisher, core.DispatcherConfig{
 		PollInterval: pollInterval,
-		WorkerCount:  workerCount,
+		WorkerCount:  *workerCount,
 		Logger:       logger,
 	})
 	if err != nil {
@@ -139,49 +140,35 @@ func main() {
 	}
 	logger.Info("dispatcher started",
 		"mode", mode,
-		"worker_count", workerCount,
+		"worker_count", *workerCount,
+		"poll_interval", pollInterval,
 	)
 
 	// Start health check HTTP server
-	// This is essential for containerized deployments (ECS, Kubernetes, etc.)
 	mux := http.NewServeMux()
 
 	// /health endpoint (liveness probe)
-	// Returns 200 OK if the dispatcher is running and not stuck
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		status := dispatcher.HealthStatus()
 
-		// Check if dispatcher is running and not pending shutdown
 		if !status.IsHealthy() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte("Unhealthy: dispatcher not running or shutting down\n"))
 			return
 		}
 
-		// Optional: Check if processing is stale (no messages processed for >5 minutes)
-		// Uncomment if you want to detect stuck workers
-		// if status.IsStale(5 * time.Minute) {
-		// 	w.WriteHeader(http.StatusServiceUnavailable)
-		// 	w.Write([]byte("Unhealthy: no messages processed recently\n"))
-		// 	return
-		// }
-
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK\n"))
 	})
 
 	// /ready endpoint (readiness probe)
-	// Returns 200 OK if the dispatcher is ready to process messages
-	// This checks database connectivity
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		// Check if dispatcher is running
 		if !dispatcher.IsRunning() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte("Not ready: dispatcher not running\n"))
 			return
 		}
 
-		// Check database connectivity
 		if err := pool.Ping(r.Context()); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte("Not ready: database unreachable\n"))
@@ -213,7 +200,6 @@ func main() {
 	logger.Info("shutdown signal received")
 
 	// Shutdown health server
-	// Use context.WithoutCancel to preserve parent's values (trace ID, logger) during shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := healthServer.Shutdown(shutdownCtx); err != nil {

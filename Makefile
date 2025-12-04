@@ -4,10 +4,10 @@
 # Note: -p 1 is required to prevent flaky tests caused by concurrent package execution.
 # Both contrib/pgx and contrib/gorm share the same 'outbox' table, which causes race conditions
 # when tests run in parallel. This does NOT affect goroutine-level parallelism within tests.
-test: ## Run all tests (requires DB - run 'make up' first)
+test: up ## Run all tests (requires DB - run 'make up' first)
 	go test ./... --count=1 -race -p 1
 
-test-v: ## Run all tests with verbose output
+test-v: up ## Run all tests with verbose output
 	go test ./... -v --count=1 -race -p 1
 
 test-short: ## Run unit tests only (no DB required)
@@ -18,18 +18,28 @@ test-coverage: ## Run tests with coverage report
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
-# Docker commands
+# Docker commands (Root infrastructure for CI/tests)
 up: ## Start local infrastructure (PostgreSQL + LocalStack)
-	cd examples/local && docker-compose up -d
+	docker-compose up -d
 
 down: ## Stop local infrastructure
-	cd examples/local && docker-compose down
+	docker-compose down
 
 logs: ## Show docker-compose logs
-	cd examples/local && docker-compose logs -f
+	docker-compose logs -f
 
 ps: ## Show docker-compose status
-	cd examples/local && docker-compose ps
+	docker-compose ps
+
+# Example app commands
+app-up: ## Start example application
+	cd examples/app && docker-compose up -d
+
+app-down: ## Stop example application
+	cd examples/app && docker-compose down
+
+app-logs: ## Show example application logs
+	cd examples/app && docker-compose logs -f
 
 # Build commands
 build: ## Build all packages

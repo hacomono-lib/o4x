@@ -621,6 +621,16 @@ func CleanupWithMetrics(ctx context.Context) error {
 | `VisibilityTimeout` | 30 | SQS visibility timeout |
 | `MaxRetries` | 5 | Max processing attempts |
 | `WorkerCount` | 1 | Number of concurrent workers |
+| `MessageConcurrency` | 1 | Messages processed concurrently per worker (>1 only for Standard queues) |
+
+**MessageConcurrency** (new feature):
+- Controls parallel message processing within each worker
+- **Standard queues**: Can use any value (e.g., 10 for 10x parallelism)
+- **FIFO queues**: Must be 1 (parallel processing breaks ordering guarantees)
+- **Total parallelism**: `WorkerCount * MessageConcurrency`
+- **Example**: `WorkerCount=5, MessageConcurrency=10` → 50 messages processed simultaneously
+- **Use when**: Fast handlers (<100ms), high throughput needs, I/O-bound operations
+- **Performance tip**: Start with 5-10, monitor DB connection pool, increase based on metrics
 
 **Note**: Consumer service checks context cancellation before each polling cycle. SQS long polling (up to 20s) may delay shutdown, but context is respected during message processing.
 

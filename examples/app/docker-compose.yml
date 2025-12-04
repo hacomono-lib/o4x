@@ -1,0 +1,107 @@
+services:
+  postgres:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.postgres
+    container_name: o4x-app-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: o4x
+    ports:
+      - "25432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/002_app_tables.sql:/docker-entrypoint-initdb.d/03_app_tables.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:latest
+    container_name: o4x-app-localstack
+    ports:
+      - "24566:4566"
+    environment:
+      SERVICES: sqs
+      DEFAULT_REGION: us-east-1
+      DEBUG: 1
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - ./init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
+    healthcheck:
+      test: ["CMD", "awslocal", "sqs", "list-queues"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: examples/app/Dockerfile.api
+    container_name: o4x-app-api
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
+      PORT: 8000
+    ports:
+      - "18000:8000"
+    cpu_count: 1
+    mem_limit: 2g
+    mem_reservation: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  dispatcher:
+    build:
+      context: ../..
+      dockerfile: examples/app/Dockerfile.dispatcher
+    container_name: o4x-app-dispatcher
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/o4x-events.fifo
+      STANDARD_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-standard
+      AWS_REGION: us-east-1
+      HEALTH_PORT: 8080
+    ports:
+      - "18080:8080"
+    cpu_count: 1
+    mem_limit: 2g
+    mem_reservation: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  consumer:
+    build:
+      context: ../..
+      dockerfile: examples/app/Dockerfile.consumer
+    container_name: o4x-app-consumer
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-standard
+      AWS_REGION: us-east-1
+      HEALTH_PORT: 8081
+      # メール送信を想定した処理時間
+      NOTIFICATION_EMAIL_SLEEP_MIN: 250ms
+      NOTIFICATION_EMAIL_SLEEP_MAX: 2s
+    ports:
+      - "18081:8081"
+    cpu_count: 1
+    mem_limit: 2g
+    mem_reservation: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  localstack_data:
