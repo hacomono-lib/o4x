@@ -192,9 +192,34 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 - Standard: No SQS deduplication, handler MUST be idempotent
 - Both: Application handlers must be idempotent for at-least-once delivery
 
-### Fan-Out Pattern (1 Message → N Handlers)
+### Topic-based Routing vs Fan-Out
 
-**IMPORTANT**: `consumer_messages` table is designed for **Point to Point** (1 Queue → 1 Consumer Service).
+**IMPORTANT**: `TopicRouter` is for **Topic-based Routing**, NOT Fan-Out.
+
+**Topic-based Routing** (current `TopicRouter` feature):
+```go
+// 1 Queue receives DIFFERENT message types (different topics)
+router.Register("order.created", OrderHandler)       // topic A → Handler A
+router.Register("user.registered", UserHandler)      // topic B → Handler B
+router.Register("notification.email", EmailHandler)  // topic C → Handler C
+```
+- Purpose: Route different event types to appropriate handlers
+- 1 topic → 1 Handler
+
+**Fan-Out** (same message → multiple handlers):
+```
+Same message "order.created" processed by multiple handlers:
+→ EmailHandler (send email)
+→ SlackHandler (notify Slack)
+→ MetricsHandler (track analytics)
+```
+- Purpose: Process the same message in multiple ways
+- 1 message → N Handlers
+
+### Fan-Out Pattern with SQS (Physical Queue Separation Required)
+
+**SQS Constraint**: Point to Point delivery (1 message → 1 consumer only).
+**Fan-Out is physically impossible** within a single SQS queue.
 
 **Why Composite Handler is NOT recommended with Repository**:
 ```go
@@ -234,7 +259,16 @@ service := consumer.NewService(sqsClient, nil, compositeHandler, config)
 ```
 However, you lose audit trail and observability for individual handler failures.
 
-**Rule of Thumb**: Need Fan-Out? Use SNS + multiple SQS queues with separate Consumer services.
+**Other Messaging Systems (Out of Scope)**:
+- **Kinesis/Kafka**: True Pub/Sub (1 record → N consumers can read)
+  - Fan-Out is native: Multiple consumer applications read from 1 stream
+  - Each consumer app can use Topic-based Routing internally
+  - o4x is SQS-specific and does not support Kinesis/Kafka
+- If you need native Fan-Out, consider Kinesis/Kafka instead of SQS
+
+**Rule of Thumb**:
+- Topic-based Routing (different events) → Use `TopicRouter` with 1 SQS queue
+- Fan-Out (same event, multiple handlers) → Use SNS + multiple SQS queues OR consider Kinesis/Kafka
 
 ### Environment Variables
 
