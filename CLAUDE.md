@@ -138,6 +138,7 @@ service.Start(ctx)
   - `Repository` is optional (nil = no DB tracking)
   - Repository purpose: Audit log and observability, NOT execution control
   - Handler must be idempotent regardless of Repository usage
+  - **Point to Point design**: 1 Queue → 1 Consumer Service (see Fan-Out Pattern section for multi-handler scenarios)
 
 - **contrib/pgx/**: PostgreSQL repository using pgx (includes BatchOutboxRepository)
 - **contrib/gorm/**: PostgreSQL repository using GORM (includes BatchOutboxRepository)
@@ -152,7 +153,11 @@ service.Start(ctx)
 - Indexes: `idx_outbox_status_created_at`, `idx_outbox_status_next_retry_at`
 
 **Consumer Messages Table** (Consumer side, optional):
+- `id` (UUID v7), `outbox_id`, `message_id` (UNIQUE), `receipt_handle`
+- `status` (ENUM), `error_message`, `receive_count`, `max_retries`
+- `queue_url`, `processed_at`, `created_at`, `updated_at`
 - Tracks consumption state only, never updated by Publisher
+- **UNIQUE constraint on `message_id`**: 1 SQS Message = 1 Record (Point to Point design)
 
 ### Startup Recovery
 
@@ -186,6 +191,50 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 - FIFO: SQS provides 5-min deduplication window
 - Standard: No SQS deduplication, handler MUST be idempotent
 - Both: Application handlers must be idempotent for at-least-once delivery
+
+### Fan-Out Pattern (1 Message → N Handlers)
+
+**IMPORTANT**: `consumer_messages` table is designed for **Point to Point** (1 Queue → 1 Consumer Service).
+
+**Why Composite Handler is NOT recommended with Repository**:
+```go
+// ❌ AVOID: Composite Handler with consumer_messages
+composite := &CompositeHandler{
+    handlers: []Handler{&EmailHandler{}, &SlackHandler{}, &MetricsHandler{}},
+}
+```
+
+**Problem**: `consumer_messages.status` is a single state (CONSUMING/CONSUMED/FAILED/DEAD).
+- If EmailHandler succeeds but SlackHandler fails → What status should be recorded?
+- CONSUMED → Loses SlackHandler failure information
+- FAILED → Ignores EmailHandler success
+- **Partial failures cannot be tracked accurately**
+
+**Recommended Fan-Out Architecture** (SNS + Multiple SQS Queues):
+```
+Publisher → SNS Topic "order.created"
+             ↓
+             ├→ SQS Queue "email-queue" → Consumer Service 1 (consumer_messages_email)
+             ├→ SQS Queue "slack-queue" → Consumer Service 2 (consumer_messages_slack)
+             └→ SQS Queue "metrics-queue" → Consumer Service 3 (consumer_messages_metrics)
+```
+
+**Key Points**:
+1. **1 Queue → 1 Consumer Service** (separate processes)
+2. Each service has independent `consumer_messages` tracking (or separate tables)
+3. Individual success/failure tracking per handler
+4. Failure in one consumer doesn't affect others
+5. Each consumer can have different retry policies and max_retries
+
+**Alternative without Repository**:
+If you don't need `consumer_messages` tracking, Composite Handler is acceptable:
+```go
+// ✅ OK: Composite Handler without Repository
+service := consumer.NewService(sqsClient, nil, compositeHandler, config)
+```
+However, you lose audit trail and observability for individual handler failures.
+
+**Rule of Thumb**: Need Fan-Out? Use SNS + multiple SQS queues with separate Consumer services.
 
 ### Environment Variables
 
