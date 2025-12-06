@@ -49,11 +49,15 @@ lint: ## Run linter (requires golangci-lint)
 	golangci-lint run
 
 # Schema commands
-schema: ## Generate schema SQL
+schema: ## Generate schema SQL (stdout)
 	go run cmd/o4x-schema/main.go
 
-schema-consumer: ## Generate schema SQL with consumer tables
+schema-consumer: ## Generate schema SQL with consumer tables (stdout)
 	go run cmd/o4x-schema/main.go --with-consumer
+
+schema-gen: ## Generate scripts/schema.sql for test DB initialization
+	go run cmd/o4x-schema/main.go --with-consumer > scripts/schema.sql
+	@echo "Generated scripts/schema.sql"
 
 # Utility commands
 clean: ## Clean up generated files

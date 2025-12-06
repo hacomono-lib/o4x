@@ -184,6 +184,15 @@ _, err := repo.Insert(ctx, core.OutboxInsertParams{
 })
 ```
 
+#### Metadata (Optional)
+
+The `Metadata` field (JSONB) can store additional context that travels with the message. Common use cases:
+
+- **Distributed Tracing** - `trace_id`, `span_id` for OpenTelemetry/Datadog/Jaeger
+- **Custom Headers** - Values to map to SQS MessageAttributes
+- **Routing Hints** - Priority, tenant ID, or other routing metadata
+- **Audit Context** - User ID, request ID, or correlation ID
+
 ### 3. Run the Dispatcher
 
 **Standard Dispatcher (1 message at a time):**

@@ -29,6 +29,7 @@ type Outbox struct {
 	ID             string          `json:"id"` // UUID v7
 	Topic          string          `json:"topic"`
 	Payload        json.RawMessage `json:"payload"`
+	Metadata       json.RawMessage `json:"metadata,omitempty"` // Optional metadata (trace context, custom headers, etc.)
 	IdempotencyKey string          `json:"idempotency_key"`
 	Status         OutboxStatus    `json:"status"`
 	ErrorMessage   *string         `json:"error_message,omitempty"`
@@ -43,6 +44,7 @@ type Outbox struct {
 type OutboxInsertParams struct {
 	Topic          string
 	Payload        json.RawMessage
+	Metadata       json.RawMessage // Optional metadata (trace_id, span_id, custom headers, etc.)
 	IdempotencyKey string
 	MaxRetries     int
 }

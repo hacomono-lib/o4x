@@ -20,10 +20,10 @@ import (
 )
 
 type SystemInfo struct {
-	OS          string `json:"os"`
-	Arch        string `json:"arch"`
-	NumCPU      int    `json:"num_cpu"`
-	GoVersion   string `json:"go_version"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	NumCPU    int    `json:"num_cpu"`
+	GoVersion string `json:"go_version"`
 }
 
 type BenchmarkConfig struct {

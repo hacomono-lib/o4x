@@ -26,6 +26,7 @@ CREATE TABLE %s (
   id               UUID PRIMARY KEY,
   topic            TEXT NOT NULL,
   payload          JSONB NOT NULL,
+  metadata         JSONB,
   idempotency_key  TEXT NOT NULL,
   status           %s NOT NULL DEFAULT 'ENQUEUED',
   error_message    TEXT,

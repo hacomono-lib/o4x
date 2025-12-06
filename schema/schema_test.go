@@ -36,6 +36,7 @@ func (s *SchemaSuite) TestOutboxDDL_GeneratesCorrectSchema() {
 	assert.Contains(s.T(), ddl, "id               UUID PRIMARY KEY")
 	assert.Contains(s.T(), ddl, "topic            TEXT NOT NULL")
 	assert.Contains(s.T(), ddl, "payload          JSONB NOT NULL")
+	assert.Contains(s.T(), ddl, "metadata         JSONB")
 	assert.Contains(s.T(), ddl, "idempotency_key  TEXT NOT NULL")
 	assert.Contains(s.T(), ddl, "status           outbox_status NOT NULL DEFAULT 'ENQUEUED'")
 	assert.Contains(s.T(), ddl, "error_message    TEXT")

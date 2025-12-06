@@ -21,6 +21,7 @@ CREATE TABLE outbox (
   id               UUID PRIMARY KEY,
   topic            TEXT NOT NULL,
   payload          JSONB NOT NULL,
+  metadata         JSONB,                                         -- Optional trace context, custom headers
   idempotency_key  TEXT NOT NULL,
   status           outbox_status NOT NULL DEFAULT 'ENQUEUED',
   error_message    TEXT,
