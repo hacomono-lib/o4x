@@ -126,29 +126,10 @@ inboxRepo := pgx.NewInboxRepository(pool)
 
 **Critical**: Outbox (Publisher) and Inbox (Consumer) have independent state machines. Never mix them.
 
-**Outbox Status (5 states)** - Publisher/Dispatcher side:
-- `ENQUEUED` → `PUBLISHING` → `PUBLISHED`
-- `ENQUEUED` → `PUBLISHING` → `FAILED` → (retry) → `ENQUEUED`
-- `FAILED` → `DEAD` (when max_retries exceeded)
+- **Outbox**: ENQUEUED → PUBLISHING → PUBLISHED/FAILED/DEAD (5 states, publisher side)
+- **Inbox**: processing → completed (2 states, consumer idempotency)
 
-**Key scenarios:**
-1. **Normal**: ENQUEUED → PUBLISHING → PUBLISHED
-2. **Retry**: ENQUEUED → PUBLISHING → FAILED → (RequeueFailed) → ENQUEUED
-3. **Max retries exceeded**: FAILED → DEAD (OnMessageDead hook called)
-4. **Crash recovery**: PUBLISHING → (ReviveStuckPublishing) → FAILED
-5. **Oversized message**: ENQUEUED → PUBLISHING → DEAD (PermanentError, no retry)
-
-**Inbox Status (2 states)** - Consumer side (idempotency):
-- `processing` → `completed`
-- Failed handlers → SQS retry via visibility timeout (status stays `processing`)
-
-**Operational actions for FAILED/DEAD messages:**
-
-**Outbox FAILED**: Monitor alerts, auto-recovery via RequeueFailed, query `error_message` and `retry_count`. Common causes: network issues, AWS credentials, rate limiting. Manual reset: `UPDATE outbox SET retry_count = 0`.
-
-**Outbox DEAD**: Alert immediately via OnMessageDead hook. Common causes: payload > 256KB, malformed data, invalid routing. Recovery: fix and re-enqueue, manual publish, or archive. Add validation before Insert.
-
-**Consumer Handler Failures**: SQS handles retries via visibility timeout. If handler returns error, SQS redelivers message. Use `InboxRepository` to prevent duplicate processing. Configure SQS Dead Letter Queue (DLQ) for max retries handling.
+→ **For detailed state machine diagrams and operational guidance**, see [README.md Architecture section](README.md#1-outbox-publisher-side)
 
 ### Key Components
 
@@ -222,199 +203,24 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 
 ### Topic-based Routing vs Fan-Out
 
-**IMPORTANT**: `TopicRouter` is for **Topic-based Routing**, NOT Fan-Out.
+**Critical Distinction**: `TopicRouter` is for **Topic-based Routing**, NOT Fan-Out.
 
-**Topic-based Routing** (current `TopicRouter` feature):
-```go
-// 1 Queue receives DIFFERENT message types (different topics)
-router.Register("order.created", OrderHandler)       // topic A → Handler A
-router.Register("user.registered", UserHandler)      // topic B → Handler B
-router.Register("notification.email", EmailHandler)  // topic C → Handler C
-```
-- Purpose: Route different event types to appropriate handlers
-- 1 topic → 1 Handler
+- **Topic-based Routing**: Different event types → different handlers (1 topic → 1 handler)
+- **Fan-Out**: Same event → multiple handlers (1 message → N handlers)
 
-**Fan-Out** (same message → multiple handlers):
-```
-Same message "order.created" processed by multiple handlers:
-→ EmailHandler (send email)
-→ SlackHandler (notify Slack)
-→ MetricsHandler (track analytics)
-```
-- Purpose: Process the same message in multiple ways
-- 1 message → N Handlers
-
-**SQS Constraint**: Point to Point delivery (1 message → 1 consumer only). **Fan-Out is physically impossible** within a single SQS queue.
-
-**Recommended Fan-Out Architecture** (SNS + Multiple SQS Queues):
-```
-Publisher → SNS Topic "order.created"
-             ↓
-             ├→ SQS Queue "email-queue" → Consumer Service 1
-             ├→ SQS Queue "slack-queue" → Consumer Service 2
-             └→ SQS Queue "metrics-queue" → Consumer Service 3
-```
-
-**Key Points**:
-1. 1 Queue → 1 Consumer Service (separate processes)
-2. Each service tracks idempotency independently using `InboxRepository`
-3. Individual success/failure tracking per handler
-4. Failure in one consumer doesn't affect others
-
-**Alternative**: Kinesis/Kafka (native Fan-Out, out of o4x scope)
+**SQS Constraint**: Point-to-Point delivery (1 message → 1 consumer only). **Fan-Out is impossible** within a single SQS queue.
 
 **Rule of Thumb**:
-- Topic-based Routing (different events) → Use `TopicRouter` with 1 SQS queue
-- Fan-Out (same event, multiple handlers) → Use SNS + multiple SQS queues OR Kinesis/Kafka
+- Different events → Use `TopicRouter` with 1 SQS queue
+- Same event, multiple handlers → Use SNS + multiple SQS queues OR Kinesis/Kafka
+
+→ **For detailed examples and architecture diagrams**, see [README.md Multiple Queues section](README.md#multiple-queues-topic-based-routing)
 
 ## Consumer Patterns
 
 ### Idempotency Strategy
 
-SQS provides at-least-once delivery, so handlers must be idempotent. Choose an approach:
-
-#### InboxRepository (Recommended)
-
-Use `consumer_inbox` table for database-level idempotency checking.
-
-**When to use**:
-- ✅ DB operations only (within transaction)
-- ✅ External API calls with idempotency key support
-- ❌ External APIs without idempotency support → **Don't use async messaging**
-
-**Transaction Pattern** (Recommended):
-
-```go
-func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    tx := h.db.Begin()
-    defer tx.Rollback()
-
-    // 1. Check idempotency (within transaction)
-    inboxTx := h.inboxRepo.WithTx(tx)
-    ok, err := inboxTx.TryStart(ctx, "OrderHandler", msg.MessageID)
-    if err != nil {
-        return err
-    }
-    if !ok {
-        return nil // Already completed (duplicate)
-    }
-
-    // 2. Business logic (same transaction)
-    var event OrderCreatedEvent
-    json.Unmarshal(msg.Body, &event)
-
-    if err := tx.Create(&Order{
-        ID:         event.OrderID,
-        CustomerID: event.CustomerID,
-        Amount:     event.Amount,
-    }).Error; err != nil {
-        return err
-    }
-
-    // 3. Mark completed
-    if err := inboxTx.Complete(ctx, "OrderHandler", msg.MessageID); err != nil {
-        return err
-    }
-
-    // 4. Commit (all or nothing)
-    return tx.Commit().Error
-}
-```
-
-**Why transaction is recommended**:
-- ✅ Protects non-idempotent business logic (e.g., `UPDATE counters SET count = count + 1`)
-- ✅ Multiple DB operations are atomic with inbox state
-- ✅ Crash during processing → full rollback → safe to retry
-
-**Auto-commit Pattern** (Only when fully idempotent):
-
-Use when ALL of these conditions are met:
-1. ✅ Business logic uses `ON CONFLICT DO NOTHING`
-2. ✅ External APIs support idempotency keys
-3. ✅ No multi-step DB operations requiring atomicity
-
-```go
-func (h *NotificationHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    // 1. Check idempotency (auto-commit)
-    ok, err := h.inboxRepo.TryStart(ctx, "NotificationHandler", msg.MessageID)
-    if err != nil {
-        return err
-    }
-    if !ok {
-        return nil // Already completed
-    }
-
-    // 2. Idempotent DB operation (auto-commit)
-    h.db.Exec(`INSERT INTO notifications (user_id, message_id, content)
-               VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING`,
-               event.UserID, msg.MessageID, event.Content)
-
-    // 3. Call external API with idempotency key
-    if err := h.emailClient.Send(EmailRequest{
-        To:             event.Email,
-        IdempotencyKey: msg.MessageID, // ← API handles duplicates
-    }); err != nil {
-        return err
-    }
-
-    // 4. Mark completed (auto-commit)
-    return h.inboxRepo.Complete(ctx, "NotificationHandler", msg.MessageID)
-}
-```
-
-**Retry scenarios comparison**:
-
-| Scenario | Transaction | Auto-commit |
-|----------|-------------|-------------|
-| Crash after TryStart, before business logic | Rollback → Retry safe | Inbox record exists → TryStart returns true → Retry safe |
-| Crash after business logic, before Complete | Rollback → Retry safe | **Depends on business logic idempotency** |
-| Business logic fails | Rollback → Retry safe | **May leave inbox in 'processing' state** |
-
-**Recommendation**: Use transaction pattern unless you have specific performance requirements and can guarantee full idempotency.
-
-#### Application-Level Idempotency
-
-Use when InboxRepository overhead is not justified (e.g., simple analytics, logging).
-
-**Strategies**:
-1. **DB Unique Constraint**: `ON CONFLICT (message_id) DO NOTHING`
-2. **Redis Cache**: `SetNX` with TTL for fast deduplication
-3. **Business Data Check**: Query if operation already completed
-
-**Example**:
-```go
-func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    tx := h.db.Begin()
-    defer tx.Rollback()
-
-    // Idempotent insert
-    result := tx.Exec(`INSERT INTO orders (id, customer_id, message_id)
-                       VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING`,
-                       event.OrderID, event.CustomerID, msg.MessageID)
-
-    if result.RowsAffected == 0 {
-        return nil // Already processed
-    }
-
-    // Process new order
-    if err := h.processNewOrder(tx, event); err != nil {
-        return err
-    }
-
-    return tx.Commit()
-}
-```
-
-#### External APIs Without Idempotency Support
-
-**Don't use asynchronous message processing**. Creating a send queue table defeats the purpose of using o4x.
-
-**Your options**:
-1. **Switch to an idempotent API** ✅ (Recommended) - Stripe, Twilio, SendGrid, AWS SES
-2. **Accept duplicate calls** ⚠️ - If duplicates are tolerable (e.g., notification emails)
-3. **Call API synchronously** ⚠️ - Within application transaction (loses async benefits)
-
-**Bottom line**: Non-idempotent APIs are fundamentally incompatible with at-least-once delivery semantics. Fix the API, not the pattern.
+SQS provides at-least-once delivery, so handlers must be idempotent.
 
 #### Decision Tree
 
@@ -445,6 +251,8 @@ func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) err
 5. Set cleanup TTLs via `InboxCleaner.DeleteOlderThan()` (completed: 7-30d, processing: 30-90d)
 6. Monitor stuck messages in 'processing' status (indicates handler crashes)
 7. **Important**: Return `nil` on duplicates, not an error
+
+→ **For complete code examples and detailed implementation patterns**, see [README.md Idempotency section](README.md#idempotency)
 
 ### MessageConcurrency
 

@@ -1,6 +1,6 @@
 # o4x
 
-<table style="border: none; border-collapse: collapse;">
+<table style="border-collapse: collapse; border: none;">
 <tr>
 <td width="200" style="border: none;">
 <img src="docs/o4x_logo.png" alt="o4x logo" width="180" />
@@ -177,14 +177,35 @@ import (
 // Create repository
 repo := pgx.NewOutboxRepository(pool)
 
-// Insert message (do this within your business transaction)
-_, err := repo.Insert(ctx, core.OutboxInsertParams{
+// Start database transaction
+tx, err := pool.Begin(ctx)
+if err != nil {
+    return err
+}
+defer tx.Rollback(ctx)
+
+// Execute your business logic
+if _, err := tx.Exec(ctx, "INSERT INTO users (id, name) VALUES ($1, $2)", userID, userName); err != nil {
+    return err
+}
+
+// Insert message to outbox within the same transaction
+if _, err := repo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
     Topic:          "user.created",
     Payload:        json.RawMessage(`{"user_id": "123"}`),
     IdempotencyKey: "user-123-created",
     MaxRetries:     10,
-})
+}); err != nil {
+    return err
+}
+
+// Commit both operations atomically
+if err := tx.Commit(ctx); err != nil {
+    return err
+}
 ```
+
+**Important:** Always use `WithTx()` to ensure your business logic and outbox insertion are atomic. If the transaction rolls back, the message won't be sent.
 
 #### Metadata (Optional)
 
@@ -256,9 +277,6 @@ import (
     "github.com/hacomono-lib/o4x/contrib/sqs/consumer"
 )
 
-// Create repository (optional - can be nil)
-repo := pgx.NewConsumerRepository(pool)
-
 // Create handler (see "Handler Patterns" section for more options)
 handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
     log.Printf("Received: topic=%s, body=%s", msg.Topic, msg.Body)
@@ -266,8 +284,7 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 })
 
 // Create and start service with the handler
-// Pass nil for repo if you don't need DB tracking
-svc := consumer.NewService(sqsClient, repo, handler, consumer.ServiceConfig{
+svc := consumer.NewService(sqsClient, handler, consumer.ServiceConfig{
     QueueURL:    queueURL,
     WorkerCount: 4,
     MaxRetries:  5,
@@ -296,12 +313,12 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 
 ### Topic Router
 
-Route messages to different handlers based on topic:
+Route messages to different handlers based on topic. TopicRouter provides three registration methods:
 
 ```go
 router := consumer.NewTopicRouter()
 
-// Register handlers for specific topics
+// 1. RegisterFunc - Register inline handler functions for specific topics
 router.RegisterFunc("order.created", func(ctx context.Context, msg *consumer.SQSMessage) error {
     // Handle order.created events
     return nil
@@ -312,15 +329,44 @@ router.RegisterFunc("user.registered", func(ctx context.Context, msg *consumer.S
     return nil
 })
 
-// Optional: Set fallback for unknown topics
+// 2. Register - Register Handler interface implementations
+type OrderHandler struct {
+    db *sql.DB
+}
+
+func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    // Handle with access to dependencies
+    return nil
+}
+
+router.Register("order.shipped", &OrderHandler{db: db})
+
+// 3. RegisterPrefix - Match topic prefixes (checked after exact matches)
+router.RegisterPrefix("notification.", consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
+    // Handles: notification.email, notification.sms, notification.push, etc.
+    return nil
+}))
+
+router.RegisterPrefix("log.", consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
+    // Handles: log.access, log.error, log.audit, etc.
+    return nil
+}))
+
+// 4. SetFallback - Handle unknown topics (optional but recommended)
 router.SetFallback(consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
     log.Printf("unhandled topic: %s", msg.Topic)
     return nil  // Return nil to acknowledge, error to retry
 }))
 
 // Use router as the handler
-svc := consumer.NewService(sqsClient, repo, router, config)
+svc := consumer.NewService(sqsClient, router, config)
 ```
+
+**Routing Priority:**
+1. Exact topic matches via `Register`/`RegisterFunc` (highest priority)
+2. Prefix matches via `RegisterPrefix` (checked in registration order)
+3. Fallback handler via `SetFallback` (lowest priority)
+4. If no match and no fallback: error returned, message retried
 
 ### Typed Handler (Generics)
 
@@ -371,7 +417,7 @@ func (h *MyHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error 
 
 // Use custom handler
 handler := &MyHandler{db: db, cache: cache, logger: logger}
-svc := consumer.NewService(sqsClient, repo, handler, config)
+svc := consumer.NewService(sqsClient, handler, config)
 ```
 
 ## Idempotency
@@ -385,6 +431,8 @@ o4x provides **at-least-once delivery** with strong consistency guarantees:
 - **Note**: Due to crash recovery edge cases, messages may be published more than once to SQS
 
 ### Consumer Side
+
+💡 **For decision tree guidance**, see [CLAUDE.md Idempotency Strategy](CLAUDE.md#idempotency-strategy)
 
 **IMPORTANT:** You must implement idempotency in your message handlers!
 
@@ -448,20 +496,37 @@ func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
 }
 ```
 
-**3. Use Consumer Repository (Built-in Tracking)**
+**3. Use InboxRepository (Transactional Inbox Pattern)**
 
 ```go
-// Consumer repository automatically tracks message status
-// Note: Repository records processing attempts but does NOT prevent duplicate Handler execution
-// Your handler must still be idempotent
-repo := pgx.NewConsumerRepository(pool)
-svc := consumer.NewService(sqsClient, repo, handler, config)
+// Use InboxRepository for database-level idempotency with transaction support
+inboxRepo := pgx.NewInboxRepository(pool)
+
+handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
+    tx, _ := db.Begin(ctx)
+    defer tx.Rollback(ctx)
+
+    // Check idempotency (within transaction)
+    inboxTx := inboxRepo.WithTx(tx)
+    ok, _ := inboxTx.TryStart(ctx, "HandlerName", msg.MessageID)
+    if !ok {
+        return nil // Already processed
+    }
+
+    // Process message (same transaction)
+    // ... business logic ...
+
+    // Mark completed
+    inboxTx.Complete(ctx, "HandlerName", msg.MessageID)
+
+    return tx.Commit(ctx)
+})
 
 // Benefits:
-// - Audit trail: Full history of processing attempts
-// - Failure investigation: Preserve error messages
-// - Metrics: Query receive_count, processing times, failure rates
-// - Crash recovery: ReviveStuckConsuming() identifies stuck messages
+// - Atomic idempotency check with business logic
+// - Race-safe duplicate detection via (consumer_name, message_id) primary key
+// - Audit trail: Processing status and timestamps
+// - See CLAUDE.md for detailed usage patterns
 ```
 
 **4. Make Operations Idempotent**
@@ -552,18 +617,25 @@ func StartCleanupScheduler(ctx context.Context) {
 | `PUBLISHING` | N/A | Should be transient, use `ReviveStuckPublishing()` instead |
 | `FAILED` | N/A | Should be auto-retried or moved to DEAD |
 
-#### Consumer Messages Cleanup
+#### Consumer Inbox Cleanup
 
 ```go
-consumerRepo := pgx.NewConsumerRepository(pool)
+inboxRepo := pgx.NewInboxRepository(pool)
 
-// Delete CONSUMED messages older than 7 days
-consumedCount, err := consumerRepo.DeleteOlderThan(ctx, consumer.StatusConsumed, 7*24*time.Hour)
-log.Printf("Deleted %d CONSUMED messages", consumedCount)
+// Delete COMPLETED messages older than 7 days
+completedCount, err := inboxRepo.DeleteOlderThan(ctx, core.InboxStatusCompleted, 7*24*time.Hour)
+if err != nil {
+    return fmt.Errorf("failed to delete COMPLETED inbox messages: %w", err)
+}
+log.Printf("Deleted %d COMPLETED inbox messages", completedCount)
 
-// Delete DEAD consumer messages older than 30 days
-deadCount, err := consumerRepo.DeleteOlderThan(ctx, consumer.StatusDead, 30*24*time.Hour)
-log.Printf("Deleted %d DEAD consumer messages", deadCount)
+// Delete stuck PROCESSING messages older than 30 days
+// These are messages where handler crashed during processing
+processingCount, err := inboxRepo.DeleteOlderThan(ctx, core.InboxStatusProcessing, 30*24*time.Hour)
+if err != nil {
+    return fmt.Errorf("failed to delete PROCESSING inbox messages: %w", err)
+}
+log.Printf("Deleted %d stuck PROCESSING inbox messages", processingCount)
 ```
 
 #### Monitoring Cleanup
@@ -737,9 +809,9 @@ publisher := sqs.NewPublisher(sqsClient, queueURL)
 publisher := sqs.NewBatchPublisher(sqsClient, queueURL)
 ```
 
-### Multiple Queues
+### Multiple Queues (Topic-based Routing)
 
-For advanced use cases, route topics to different queues. You can mix Standard and FIFO queues:
+For advanced use cases, route topics to different queues. TopicQueueMap provides two registration methods:
 
 ```go
 import "github.com/hacomono-lib/o4x/contrib/sqs"
@@ -748,12 +820,12 @@ import "github.com/hacomono-lib/o4x/contrib/sqs"
 // TopicQueueMap is thread-safe and can be registered concurrently
 router := sqs.NewTopicQueueMap("https://sqs.../default-queue") // Standard
 
-// Route order topics to FIFO queue (ordering required)
+// 1. Register - Exact topic match (highest priority)
 router.Register("order.created", "https://sqs.../orders-queue.fifo")
 router.Register("order.updated", "https://sqs.../orders-queue.fifo")
 router.Register("payment.completed", "https://sqs.../payments-queue.fifo")
 
-// Route notification topics to Standard queue (high throughput, order doesn't matter)
+// 2. RegisterPrefix - Prefix-based routing (checked after exact matches)
 router.RegisterPrefix("notification.", "https://sqs.../notifications-queue") // Standard
 router.RegisterPrefix("log.", "https://sqs.../logs-queue") // Standard
 
@@ -761,7 +833,15 @@ router.RegisterPrefix("log.", "https://sqs.../logs-queue") // Standard
 publisher := sqs.NewMultiQueuePublisher(sqsClient, router)
 // or for batch
 publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
+
+// Use with dispatcher
+dispatcher := core.NewBatchDispatcher(repo, publisher, config)
 ```
+
+**Routing Priority:**
+1. Exact topic match via `Register()` (highest priority)
+2. Prefix match via `RegisterPrefix()` (checked in registration order)
+3. Default queue (specified in `NewTopicQueueMap`)
 
 **Thread Safety**: `TopicQueueMap` is safe for concurrent use. You can call `Register()`, `RegisterPrefix()`, and `QueueURL()` from multiple goroutines without external synchronization.
 
@@ -827,13 +907,59 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, core.BatchDispatcherConfi
 })
 ```
 
-**Available Hooks**:
+**Available Publisher Hooks**:
 - `OnPublishStart` - Before publishing a message
 - `OnPublishSuccess` - After successful publish
 - `OnPublishFailure` - On publish error (includes retryability flag)
 - `OnMessageDead` - When message exceeds max retries
 - `OnBatchPublishStart` - Before publishing a batch
 - `OnBatchPublishComplete` - After batch publish (includes success/failure counts)
+
+#### Consumer Hooks
+
+Consumer also provides hooks for monitoring message consumption:
+
+```go
+import "github.com/hacomono-lib/o4x/contrib/sqs/consumer"
+
+hooks := &consumer.Hooks{
+    OnConsumeStart: func(ctx context.Context, msg *consumer.SQSMessage) {
+        metrics.IncrCounter("consumer.start", "topic", msg.Topic)
+    },
+    OnConsumeSuccess: func(ctx context.Context, msg *consumer.SQSMessage, duration time.Duration) {
+        metrics.RecordLatency("consumer.latency", duration, "topic", msg.Topic)
+        metrics.IncrCounter("consumer.success", "topic", msg.Topic)
+    },
+    OnConsumeFailure: func(ctx context.Context, msg *consumer.SQSMessage, err error, duration time.Duration, retryable bool) {
+        metrics.IncrCounter("consumer.failure", "topic", msg.Topic, "retryable", retryable)
+        if !retryable {
+            alerting.Send("Message reached max retries", msg)
+        }
+    },
+    OnMessageDead: func(ctx context.Context, msg *consumer.SQSMessage, err error) {
+        metrics.IncrCounter("consumer.message.dead", "topic", msg.Topic)
+        // Alert ops team, log to dead letter monitoring, etc.
+    },
+    OnDeleteFailure: func(ctx context.Context, msg *consumer.SQSMessage, err error) {
+        // Critical: message will be redelivered causing duplicate processing
+        metrics.IncrCounter("consumer.delete.failure", "topic", msg.Topic)
+        alerting.Send("SQS delete failed - duplicate processing likely", msg)
+    },
+}
+
+svc := consumer.NewService(sqsClient, handler, consumer.ServiceConfig{
+    QueueURL:    queueURL,
+    WorkerCount: 4,
+    Hooks:       hooks,
+})
+```
+
+**Available Consumer Hooks**:
+- `OnConsumeStart` - Before attempting to process a message
+- `OnConsumeSuccess` - After successful message processing
+- `OnConsumeFailure` - When message processing fails (includes retryability flag)
+- `OnMessageDead` - When message exceeds max retries
+- `OnDeleteFailure` - When deleting message from SQS fails (may cause duplicates)
 
 ### Datadog APM Integration
 
@@ -858,7 +984,7 @@ sqsClient := sqs.NewFromConfig(cfg)
 
 // Use with o4x - all SQS operations will be traced
 publisher := sqspub.NewPublisher(sqsClient, queueURL)
-consumerSvc := consumer.NewService(sqsClient, repo, handler, config)
+consumerSvc := consumer.NewService(sqsClient, handler, config)
 ```
 
 ### OpenTelemetry Integration
