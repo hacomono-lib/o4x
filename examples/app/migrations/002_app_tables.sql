@@ -1,5 +1,5 @@
 -- Application-specific tables for o4x sample app
--- (outbox and consumer_messages are created by Dockerfile.postgres)
+-- (outbox and consumer_inbox are created by Dockerfile.postgres)
 
 -- Users table
 CREATE TABLE IF NOT EXISTS users (

@@ -43,7 +43,10 @@ repo := gormrepo.NewOutboxRepository(db)
 // Use custom table names
 repo := gormrepo.NewOutboxRepository(db,
     gormrepo.WithOutboxTableName("my_outbox"),
-    gormrepo.WithConsumerMessagesTableName("my_consumer_messages"),
+)
+
+inboxRepo := gormrepo.NewInboxRepository(db,
+    gormrepo.WithInboxTableName("my_inbox"),
 )
 ```
 
@@ -157,15 +160,46 @@ import gormrepo "github.com/hacomono-lib/o4x/contrib/gorm"
 consumerRepo := gormrepo.NewConsumerRepository(db)
 
 // Use with consumer service
-svc := consumer.NewService(sqsClient, consumerRepo, handler, config)
+svc := consumer.NewService(sqsClient, handler, config)
 ```
 
-### Custom Table Names
+### Using InboxRepository for Idempotency
 
 ```go
-consumerRepo := gormrepo.NewConsumerRepository(db,
-    gormrepo.WithConsumerMessagesTableName("my_consumer_messages"),
+// InboxRepository provides database-level idempotency checking
+inboxRepo := gormrepo.NewInboxRepository(db,
+    gormrepo.WithInboxTableName("my_inbox"),
 )
+
+// Use in handler
+type OrderHandler struct {
+    db    *gorm.DB
+    inbox core.InboxRepository
+}
+
+func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    tx := h.db.Begin()
+    defer tx.Rollback()
+
+    // Check idempotency
+    inboxTx := h.inbox.WithTx(tx)
+    shouldProcess, err := inboxTx.TryStart(ctx, "OrderHandler", msg.MessageID)
+    if err != nil {
+        return err
+    }
+    if !shouldProcess {
+        return nil // Already processed
+    }
+
+    // Process message...
+
+    // Mark as completed
+    if err := inboxTx.Complete(ctx, "OrderHandler", msg.MessageID); err != nil {
+        return err
+    }
+
+    return tx.Commit().Error
+}
 ```
 
 ## GORM Configuration
@@ -219,9 +253,8 @@ CREATE INDEX idx_outbox_status_created ON outbox(status, created_at)
 
 CREATE INDEX idx_outbox_idempotency ON outbox(topic, idempotency_key);
 
--- Consumer messages table
-CREATE INDEX idx_consumer_status_received ON consumer_messages(status, received_at) 
-    WHERE status = 'CONSUMING';
+-- Consumer inbox table (optional, for idempotency checking)
+-- Primary key (consumer_name, message_id) is automatically indexed
 ```
 
 ### Custom Logger

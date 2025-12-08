@@ -9,20 +9,23 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/hacomono-lib/o4x/contrib/pgx"
 	"github.com/hacomono-lib/o4x/contrib/sqs/consumer"
 )
 
 // UserRegisteredHandler handles user.registered events
-// Demonstrates idempotent processing with business data check
+// Demonstrates idempotent processing with InboxRepository (Transactional Inbox Pattern)
 type UserRegisteredHandler struct {
 	pool        *pgxpool.Pool
+	inbox       *pgx.InboxRepository
 	logger      *slog.Logger
 	sleepConfig SleepConfig
 }
 
-func NewUserRegisteredHandler(pool *pgxpool.Pool, logger *slog.Logger, sleepConfig SleepConfig) *UserRegisteredHandler {
+func NewUserRegisteredHandler(pool *pgxpool.Pool, inbox *pgx.InboxRepository, logger *slog.Logger, sleepConfig SleepConfig) *UserRegisteredHandler {
 	return &UserRegisteredHandler{
 		pool:        pool,
+		inbox:       inbox,
 		logger:      logger,
 		sleepConfig: sleepConfig,
 	}
@@ -49,33 +52,41 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	// Simulate DB operation delay
 	h.sleepConfig.Sleep()
 
+	// Idempotent processing using InboxRepository
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Idempotent insert - use message_id as deduplication key
+	// Check idempotency using InboxRepository
+	inboxTx := h.inbox.WithTx(tx)
+	shouldProcess, err := inboxTx.TryStart(ctx, "UserRegisteredHandler", msg.MessageID)
+	if err != nil {
+		return fmt.Errorf("failed to check inbox: %w", err)
+	}
+	if !shouldProcess {
+		h.logger.Info("user.registered event already processed (idempotent)",
+			"message_id", msg.MessageID,
+			"user_id", event.UserID,
+		)
+		return nil
+	}
+
+	// Insert welcome credit record
 	// This ensures we don't create duplicate welcome credits for the same message
 	query := `
 		INSERT INTO user_welcome_credits (message_id, user_id, credit_amount, granted_at)
 		VALUES ($1, $2, $3, NOW())
-		ON CONFLICT (message_id) DO NOTHING
-		RETURNING user_id
 	`
-
-	var returnedUserID uuid.UUID
-	err = tx.QueryRow(ctx, query, msg.MessageID, event.UserID, 1000).Scan(&returnedUserID)
+	_, err = tx.Exec(ctx, query, msg.MessageID, event.UserID, 1000)
 	if err != nil {
-		// If no rows returned, it means this message was already processed
-		if err.Error() == "no rows in result set" {
-			h.logger.Info("user.registered event already processed (idempotent)",
-				"message_id", msg.MessageID,
-				"user_id", event.UserID,
-			)
-			return nil
-		}
 		return fmt.Errorf("failed to insert welcome credit: %w", err)
+	}
+
+	// Mark as completed in inbox
+	if err := inboxTx.Complete(ctx, "UserRegisteredHandler", msg.MessageID); err != nil {
+		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
 	h.logger.Info("user.registered event processed successfully",

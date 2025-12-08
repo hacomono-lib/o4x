@@ -236,17 +236,18 @@ type TestPayload struct {
 func (s *TypedHandlerSuite) TestTypedHandler_UnmarshalsPayload() {
 	// Arrange
 	var receivedPayload TestPayload
-	var receivedTopic string
+	var receivedMsg *SQSMessage
 
-	handler := NewTypedHandler(func(ctx context.Context, topic string, payload TestPayload) error {
-		receivedTopic = topic
+	handler := NewTypedHandler(func(ctx context.Context, msg *SQSMessage, payload TestPayload) error {
+		receivedMsg = msg
 		receivedPayload = payload
 		return nil
 	})
 
 	msg := &SQSMessage{
-		Topic: "test.topic",
-		Body:  json.RawMessage(`{"name":"test","value":42}`),
+		MessageID: "test-msg-id",
+		Topic:     "test.topic",
+		Body:      json.RawMessage(`{"name":"test","value":42}`),
 	}
 
 	// Act
@@ -254,14 +255,15 @@ func (s *TypedHandlerSuite) TestTypedHandler_UnmarshalsPayload() {
 
 	// Assert
 	assert.NoError(s.T(), err)
-	assert.Equal(s.T(), "test.topic", receivedTopic)
+	assert.Equal(s.T(), "test.topic", receivedMsg.Topic)
+	assert.Equal(s.T(), "test-msg-id", receivedMsg.MessageID)
 	assert.Equal(s.T(), "test", receivedPayload.Name)
 	assert.Equal(s.T(), 42, receivedPayload.Value)
 }
 
 func (s *TypedHandlerSuite) TestTypedHandler_ReturnsErrorOnInvalidJSON() {
 	// Arrange
-	handler := NewTypedHandler(func(ctx context.Context, topic string, payload TestPayload) error {
+	handler := NewTypedHandler(func(ctx context.Context, msg *SQSMessage, payload TestPayload) error {
 		return nil
 	})
 
@@ -285,7 +287,7 @@ func (s *TypedHandlerSuite) TestTypedHandler_ReturnsErrorOnInvalidJSON() {
 func (s *TypedHandlerSuite) TestTypedHandler_PropagatesHandlerError() {
 	// Arrange
 	expectedErr := errors.New("handler error")
-	handler := NewTypedHandler(func(ctx context.Context, topic string, payload TestPayload) error {
+	handler := NewTypedHandler(func(ctx context.Context, msg *SQSMessage, payload TestPayload) error {
 		return expectedErr
 	})
 
@@ -305,7 +307,7 @@ func (s *TypedHandlerSuite) TestTypedHandler_WorksWithSlicePayload() {
 	// Arrange
 	var receivedPayload []string
 
-	handler := NewTypedHandler(func(ctx context.Context, topic string, payload []string) error {
+	handler := NewTypedHandler(func(ctx context.Context, msg *SQSMessage, payload []string) error {
 		receivedPayload = payload
 		return nil
 	})
@@ -327,7 +329,7 @@ func (s *TypedHandlerSuite) TestTypedHandler_WorksWithMapPayload() {
 	// Arrange
 	var receivedPayload map[string]interface{}
 
-	handler := NewTypedHandler(func(ctx context.Context, topic string, payload map[string]interface{}) error {
+	handler := NewTypedHandler(func(ctx context.Context, msg *SQSMessage, payload map[string]interface{}) error {
 		receivedPayload = payload
 		return nil
 	})

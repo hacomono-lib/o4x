@@ -34,25 +34,18 @@ CREATE TABLE outbox (
 );
 ```
 
-### Consumer Messages Table (Optional)
+### Consumer Inbox Table (Optional)
 
-The consumer_messages table tracks SQS message processing state.
+The consumer_inbox table provides idempotency checking for SQS message handlers.
 
 ```sql
-CREATE TABLE consumer_messages (
-  id               UUID PRIMARY KEY,
-  outbox_id        UUID,
-  message_id       TEXT NOT NULL UNIQUE,
-  receipt_handle   TEXT NOT NULL,
-  receive_count    INT NOT NULL,
-  queue_url        TEXT NOT NULL,
-  status           consumer_messages_status NOT NULL DEFAULT 'CONSUMING',
-  error_message    TEXT,
-  last_error_at    TIMESTAMPTZ,
-  max_retries      INT NOT NULL DEFAULT 5,
-  processed_at     TIMESTAMPTZ,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE consumer_inbox (
+  consumer_name  TEXT NOT NULL,
+  message_id     TEXT NOT NULL,
+  status         inbox_status NOT NULL DEFAULT 'processing',
+  received_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed_at   TIMESTAMPTZ,
+  PRIMARY KEY (consumer_name, message_id)
 );
 ```
 
@@ -139,23 +132,23 @@ VALUES (...);
 - B-tree index scan: O(log n)
 - Negligible for < 10M rows
 
-### Consumer Indexes
+### Consumer Inbox Indexes
 
-#### `uq_consumer_messages_message_id`
+#### Primary Key `(consumer_name, message_id)`
 
 **Purpose**: Prevent duplicate SQS message processing
 
-**Performance**: Same as outbox idempotency constraint
-
-#### `idx_consumer_messages_status`
-
-**Purpose**: Query messages by processing status
-
-**Query patterns**:
+**Query pattern**:
 ```sql
-SELECT * FROM consumer_messages WHERE status = 'FAILED';
-SELECT * FROM consumer_messages WHERE status = 'DEAD';
+SELECT consumer_name, message_id, status
+FROM consumer_inbox
+WHERE consumer_name = $1 AND message_id = $2;
 ```
+
+**Performance**:
+- B-tree index scan: O(log n)
+- Fast lookup for idempotency checking
+- Prevents duplicate INSERT via unique constraint
 
 ## Query Performance Verification
 
@@ -267,13 +260,13 @@ SELECT
   n_dead_tup,
   round(n_dead_tup::numeric * 100 / NULLIF(n_live_tup + n_dead_tup, 0), 2) AS dead_pct
 FROM pg_stat_user_tables
-WHERE tablename IN ('outbox', 'consumer_messages');
+WHERE tablename IN ('outbox', 'consumer_inbox');
 ```
 
 **If dead_pct > 20%**, run VACUUM:
 ```sql
 VACUUM ANALYZE outbox;
-VACUUM ANALYZE consumer_messages;
+VACUUM ANALYZE consumer_inbox;
 ```
 
 **For heavy bloat (dead_pct > 50%)**, run VACUUM FULL (requires table lock):
@@ -294,7 +287,7 @@ SELECT
   idx_tup_read,
   idx_tup_fetch
 FROM pg_stat_user_indexes
-WHERE tablename IN ('outbox', 'consumer_messages')
+WHERE tablename IN ('outbox', 'consumer_inbox')
 ORDER BY pg_relation_size(indexrelid) DESC;
 ```
 
@@ -393,7 +386,7 @@ Expected query performance for well-configured systems:
 - Monitor DEAD message count
 
 ✅ **Monthly**:
-- VACUUM ANALYZE on outbox and consumer_messages tables
+- VACUUM ANALYZE on outbox and consumer_inbox tables
 - Review slow query logs
 - Check if index rebuild is needed (compare index_size trend)
 

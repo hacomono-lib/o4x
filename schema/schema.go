@@ -4,7 +4,6 @@ package schema
 
 import (
 	"fmt"
-	"strings"
 )
 
 // OutboxDDL generates the DDL for the outbox table with the given table name.
@@ -58,57 +57,6 @@ ALTER TABLE %s
 `, enumName, tableName, enumName, tableName, tableName, tableName, tableName, tableName, tableName)
 }
 
-// ConsumerMessagesDDL generates the DDL for the consumer_messages table with the given table name.
-// The ENUM type name will be derived from the table name.
-//
-// Note: outbox_id does NOT have a foreign key constraint. Reasons:
-//  1. Consumer messages table is optional (can be enabled later)
-//  2. Outbox messages are periodically deleted (PUBLISHED cleanup)
-//  3. Consumer messages should be kept longer for audit trail
-//  4. The two tables have independent lifecycles (Publisher vs Consumer side)
-func ConsumerMessagesDDL(tableName string) string {
-	enumName := tableName + "_status"
-
-	return fmt.Sprintf(`-- Consumer Schema for SQS Message Processing
--- 4 states: CONSUMING, CONSUMED, FAILED, DEAD
--- NOTE: This is completely separate from outbox_status
-
-CREATE TYPE %s AS ENUM (
-  'CONSUMING',   -- Handler executing
-  'CONSUMED',    -- Handler completed, message deleted from SQS
-  'FAILED',      -- Handler error (retrying via SQS visibility timeout)
-  'DEAD'         -- Retry limit exceeded
-);
-
-CREATE TABLE %s (
-  id               UUID PRIMARY KEY,
-  outbox_id        UUID,
-  message_id       TEXT NOT NULL,
-  receipt_handle   TEXT NOT NULL,
-  receive_count    INT NOT NULL,
-  queue_url        TEXT NOT NULL,
-  status           %s NOT NULL DEFAULT 'CONSUMING',
-  error_message    TEXT,
-  last_error_at    TIMESTAMPTZ,
-  max_retries      INT NOT NULL DEFAULT 5,
-  processed_at     TIMESTAMPTZ,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Ensure each SQS message is processed only once
-ALTER TABLE %s
-  ADD CONSTRAINT uq_%s_message_id UNIQUE (message_id);
-
--- Index for querying by status
-CREATE INDEX idx_%s_status ON %s (status);
-
--- Index for outbox_id (for correlation queries, no FK constraint)
-CREATE INDEX idx_%s_outbox_id ON %s (outbox_id)
-  WHERE outbox_id IS NOT NULL;
-`, enumName, tableName, enumName, tableName, tableName, tableName, tableName, tableName, tableName)
-}
-
 // DropOutboxDDL generates the DDL to drop the outbox table and its ENUM type.
 func DropOutboxDDL(tableName string) string {
 	enumName := tableName + "_status"
@@ -117,38 +65,59 @@ DROP TYPE IF EXISTS %s;
 `, tableName, enumName)
 }
 
-// DropConsumerMessagesDDL generates the DDL to drop the consumer_messages table and its ENUM type.
-func DropConsumerMessagesDDL(tableName string) string {
+// ConsumerInboxDDL generates the DDL for the consumer_inbox table (Transactional Inbox pattern).
+//
+// Purpose:
+//   - Idempotency Store: Ensures exactly-once message processing
+//   - Atomic duplicate detection via composite primary key
+//   - Simpler design than consumer_messages (2 statuses: PROCESSING, COMPLETED)
+//
+// Design Differences from consumer_messages:
+//   - Primary Key: (consumer_name, message_id) - Natural idempotency
+//   - Status: ENUM type (consistent with outbox_status pattern)
+//   - No outbox_id, receipt_handle, receive_count, etc.
+//   - Focus: Idempotency checking, not SQS state tracking
+//
+// Usage:
+//
+//	// In consumer handler
+//	ok, err := inboxRepo.TryStart(ctx, "OrderHandler", msg.MessageID)
+//	if !ok {
+//	    return nil // Duplicate
+//	}
+//	// Process message...
+//	inboxRepo.Complete(ctx, "OrderHandler", msg.MessageID)
+func ConsumerInboxDDL(tableName string) string {
+	enumName := tableName + "_status"
+	return fmt.Sprintf(`-- Consumer Inbox Schema (Transactional Inbox / Idempotency Store)
+-- Purpose: Ensure exactly-once message processing semantics
+-- Design: Composite PK (consumer_name, message_id) for atomic duplicate detection
+-- 2 states: PROCESSING, COMPLETED
+
+CREATE TYPE %s AS ENUM (
+  'PROCESSING',  -- Message currently being processed
+  'COMPLETED'    -- Message successfully processed
+);
+
+CREATE TABLE %s (
+  consumer_name    TEXT NOT NULL,
+  message_id       TEXT NOT NULL,
+  status           %s NOT NULL DEFAULT 'PROCESSING',
+  received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed_at     TIMESTAMPTZ,
+  PRIMARY KEY (consumer_name, message_id)
+);
+
+-- Index for cleanup queries (DELETE WHERE status = 'COMPLETED' AND received_at < ...)
+CREATE INDEX idx_%s_status_received_at
+  ON %s (status, received_at);
+`, enumName, tableName, enumName, tableName, tableName)
+}
+
+// DropConsumerInboxDDL generates the DDL to drop the consumer_inbox table and its ENUM type.
+func DropConsumerInboxDDL(tableName string) string {
 	enumName := tableName + "_status"
 	return fmt.Sprintf(`DROP TABLE IF EXISTS %s;
 DROP TYPE IF EXISTS %s;
 `, tableName, enumName)
-}
-
-// MigrationSQL generates a complete migration SQL with both outbox and consumer tables.
-// Use this for a full setup with both tables.
-func MigrationSQL(outboxTableName, consumerTableName string) string {
-	var sb strings.Builder
-	sb.WriteString("-- o4x Migration: Outbox + Consumer Tables\n")
-	sb.WriteString("-- Generated by github.com/hacomono-lib/o4x/schema\n\n")
-	sb.WriteString("BEGIN;\n\n")
-	sb.WriteString(OutboxDDL(outboxTableName))
-	sb.WriteString("\n")
-	sb.WriteString(ConsumerMessagesDDL(consumerTableName))
-	sb.WriteString("\nCOMMIT;\n")
-	return sb.String()
-}
-
-// RollbackSQL generates the DDL to drop both outbox and consumer tables.
-func RollbackSQL(outboxTableName, consumerTableName string) string {
-	var sb strings.Builder
-	sb.WriteString("-- o4x Rollback: Drop Outbox + Consumer Tables\n")
-	sb.WriteString("-- Generated by github.com/hacomono-lib/o4x/schema\n\n")
-	sb.WriteString("BEGIN;\n\n")
-	// Order doesn't matter since there's no FK dependency
-	sb.WriteString(DropConsumerMessagesDDL(consumerTableName))
-	sb.WriteString("\n")
-	sb.WriteString(DropOutboxDDL(outboxTableName))
-	sb.WriteString("\nCOMMIT;\n")
-	return sb.String()
 }

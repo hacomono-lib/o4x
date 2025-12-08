@@ -8,7 +8,7 @@ RUN go mod download
 COPY . .
 
 # Generate schema for main database (o4x)
-RUN go run cmd/o4x-schema/main.go --with-consumer > /schema.sql
+RUN go run cmd/o4x-schema/main.go --with-inbox > /schema.sql
 
 # Generate init script for test database
 # This creates the test database and applies the same schema
@@ -17,7 +17,7 @@ RUN echo "-- Create test database for integration tests" > /init-test-db.sql && 
     echo "CREATE DATABASE o4x_test;" >> /init-test-db.sql && \
     echo "\\connect o4x_test" >> /init-test-db.sql && \
     echo "" >> /init-test-db.sql && \
-    go run cmd/o4x-schema/main.go --with-consumer >> /init-test-db.sql
+    go run cmd/o4x-schema/main.go --with-inbox >> /init-test-db.sql
 
 FROM postgres:17-alpine
 COPY --from=builder /schema.sql /docker-entrypoint-initdb.d/01_schema.sql

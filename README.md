@@ -51,16 +51,16 @@ flowchart LR
 
     subgraph Consumer Side
         Consumer[Consumer Service]
-        CDB[(PostgreSQL<br/>consumer_messages)]
         Handler[Your Handler]
+        CDB[(PostgreSQL<br/>consumer_inbox)]
     end
 
     App -->|"INSERT (same tx)"| DB
     Dispatcher -->|poll| DB
     Dispatcher -->|publish| SQS
     SQS -->|receive| Consumer
-    Consumer -.->|"track (optional)"| CDB
     Consumer -->|dispatch| Handler
+    Handler -.->|"idempotency (optional)"| CDB
 ```
 
 ### 1. Outbox (Publisher Side)
@@ -94,53 +94,51 @@ stateDiagram-v2
 
 ### 2. Consumer (SQS-specific, Optional)
 
-An optional component for processing SQS messages. The Consumer Repository (`consumer_messages` table) is **optional** and serves as an **audit log and observability tool**.
+An optional component for processing SQS messages. Handlers must be **idempotent** since SQS provides at-least-once delivery.
 
-**What the Repository does:**
-- ✅ **Records** all message processing attempts (status, errors, retry counts)
-- ✅ **Enables** detailed failure investigation and metrics collection
-- ✅ **Provides** crash recovery visibility via `ReviveStuckConsuming()`
-- ❌ **Does NOT prevent** duplicate Handler execution (Handler must be idempotent)
-- ❌ **Does NOT skip** Handler calls for duplicate messages
+**Idempotency Options:**
 
-**When to use the Repository:**
-- Compliance requirements (audit trail for processed messages)
-- Complex failure investigation (preserve error messages and context)
-- Detailed metrics (processing time, failure rates, duplicate detection)
-- Standard Queue usage (track duplicate delivery via `receive_count`)
+1. **InboxRepository (Recommended)** - Transactional Inbox pattern via `consumer_inbox` table
+   - ✅ Database-level guarantee with composite primary key `(consumer_name, message_id)`
+   - ✅ Simple API: `TryStart()` and `Complete()`
+   - ✅ Race-safe, handles retries correctly
+   - See [CLAUDE.md](CLAUDE.md) for detailed usage patterns
 
-**When to skip the Repository:**
-- Simple, non-critical workloads (notifications, logs)
-- FIFO Queue with low failure rates (less duplicate delivery)
-- High-throughput scenarios (avoid DB write overhead)
-- Use `consumer.NewService(sqsClient, nil, handler, config)` with `nil` repository
+2. **Application-Level** - Custom idempotency in your handler
+   - `ON CONFLICT (message_id) DO NOTHING` in business tables
+   - Redis cache with `SetNX`
+   - Business data checks
 
 **Note:** The consumer is SQS-specific and located at `contrib/sqs/consumer`. If you use Kafka or other message brokers, they typically manage consumption state internally (e.g., Kafka offsets).
 
-#### Consumer Status Flow (4 states)
+#### Handler Flow
 
 ```mermaid
 stateDiagram-v2
-    [*] --> CONSUMING: Receive from SQS
-    CONSUMING --> CONSUMED: Handler success
-    CONSUMING --> FAILED: Handler error
-    FAILED --> CONSUMING: Retry (via SQS visibility timeout)
-    FAILED --> DEAD: Max retries exceeded
-    CONSUMED --> [*]
-    DEAD --> [*]
+    [*] --> Receive: SQS delivers message
+    Receive --> CheckIdempotency: InboxRepository.TryStart()
+    CheckIdempotency --> Skip: Already completed
+    CheckIdempotency --> Process: First time or retry
+    Process --> Complete: Handler success
+    Process --> Retry: Handler error
+    Complete --> DeleteSQS: Mark completed
+    Retry --> [*]: SQS redelivers after visibility timeout
+    Skip --> DeleteSQS: Already processed
+    DeleteSQS --> [*]
 ```
 
 **Common scenarios:**
-- **Normal flow**: Receive from SQS → Handler succeeds → CONSUMED → SQS message deleted
-- **Temporary failure**: Handler error (e.g., downstream API timeout) → FAILED → SQS visibility timeout expires → retry
-- **Permanent failure**: MaxRetries exceeded (default: 5) → DEAD → SQS message deleted (NOT moved to DLQ)
-- **Crash during consuming**: Process killed while handler running → ReviveStuckConsuming on restart → FAILED → SQS retries
+- **Normal flow**: Receive from SQS → TryStart (true) → Handler succeeds → Complete → Delete from SQS
+- **Duplicate**: Receive from SQS → TryStart (false, already completed) → Skip → Delete from SQS
+- **Retry**: Receive from SQS → TryStart (true, status=processing) → Handler fails → SQS redelivers → Retry
+- **Max retries**: Handler fails repeatedly → SQS deletes message (configure DLQ to preserve)
 
 **Operational actions:**
-- **FAILED**: Usually auto-recovers via SQS visibility timeout. Check handler logs and `error_message`: `SELECT id, receive_count, error_message FROM consumer_messages WHERE status = 'FAILED'`. Fix handler bugs if persistent.
-- **DEAD**: Message deleted from SQS, preserved in `consumer_messages` table. Query: `SELECT id, message_id, error_message FROM consumer_messages WHERE status = 'DEAD'`. Use `OnMessageDead` hook to preserve payloads. Options: (1) Extract payload and re-insert to outbox table, (2) Manual processing, (3) Archive/delete if invalid. See CLAUDE.md for detailed recovery procedures.
+- **Handler failures**: Check handler logs and fix bugs. SQS auto-retries via visibility timeout.
+- **Max retries exceeded**: Configure SQS Dead Letter Queue (DLQ) to preserve failed messages. Use `OnMessageDead` hook for custom handling.
+- **Stuck processing**: Messages with `status=processing` in `consumer_inbox` will naturally retry when SQS redelivers.
 
-**Important:** Outbox and Consumer have completely separate state machines. The consumer never updates the outbox table.
+**Important:** Consumer never updates the outbox table. Outbox and Consumer are completely independent.
 
 ## Quick Start
 
@@ -151,8 +149,12 @@ Use the schema generator to create the required tables:
 ```go
 import "github.com/hacomono-lib/o4x/schema"
 
-// Generate migration SQL
-sql := schema.MigrationSQL("outbox", "consumer_messages")
+// Generate DDL for outbox table
+outboxDDL := schema.OutboxDDL("outbox")
+
+// Generate DDL for consumer inbox (optional, for idempotency)
+inboxDDL := schema.ConsumerInboxDDL("consumer_inbox")
+
 // Execute the SQL against your database
 ```
 
@@ -332,8 +334,8 @@ type OrderCreatedEvent struct {
 }
 
 // Create typed handler
-orderHandler := consumer.NewTypedHandler(func(ctx context.Context, topic string, event OrderCreatedEvent) error {
-    log.Printf("Order %s created for user %s, amount=%d", event.OrderID, event.UserID, event.Amount)
+orderHandler := consumer.NewTypedHandler(func(ctx context.Context, msg *consumer.SQSMessage, event OrderCreatedEvent) error {
+    log.Printf("Order %s created for user %s, amount=%d (msgID=%s)", event.OrderID, event.UserID, event.Amount, msg.MessageID)
     return nil
 })
 

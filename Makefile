@@ -1,4 +1,4 @@
-.PHONY: test test-short test-coverage lint build up down clean schema
+.PHONY: test test-short test-coverage lint build up down clean schema schema-inbox schema-gen
 
 # Test commands
 # Note: -p 1 is required to prevent flaky tests caused by concurrent package execution.
@@ -52,11 +52,11 @@ lint: ## Run linter (requires golangci-lint)
 schema: ## Generate schema SQL (stdout)
 	go run cmd/o4x-schema/main.go
 
-schema-consumer: ## Generate schema SQL with consumer tables (stdout)
-	go run cmd/o4x-schema/main.go --with-consumer
+schema-inbox: ## Generate schema SQL with consumer_inbox table (stdout)
+	go run cmd/o4x-schema/main.go --with-inbox
 
 schema-gen: ## Generate scripts/schema.sql for test DB initialization
-	go run cmd/o4x-schema/main.go --with-consumer > scripts/schema.sql
+	go run cmd/o4x-schema/main.go --with-inbox > scripts/schema.sql
 	@echo "Generated scripts/schema.sql"
 
 # Utility commands

@@ -11,8 +11,8 @@ import (
 func main() {
 	// Flags
 	outboxTable := flag.String("outbox", "outbox", "Outbox table name")
-	consumerTable := flag.String("consumer", "consumer_messages", "Consumer messages table name (used with --with-consumer)")
-	withConsumer := flag.Bool("with-consumer", false, "Include consumer_messages table DDL")
+	inboxTable := flag.String("inbox", "consumer_inbox", "Consumer inbox table name (used with --with-inbox)")
+	withInbox := flag.Bool("with-inbox", false, "Include consumer_inbox table DDL (Transactional Inbox pattern)")
 	rollback := flag.Bool("rollback", false, "Generate rollback (DROP) SQL instead of migration")
 	help := flag.Bool("help", false, "Show help")
 	flag.BoolVar(help, "h", false, "Show help")
@@ -34,15 +34,15 @@ Examples:
   # Generate outbox table with custom name
   o4x-schema --outbox my_outbox > migration.sql
 
-  # Generate both outbox and consumer tables
-  o4x-schema --with-consumer > migration.sql
+  # Generate outbox + consumer_inbox (Transactional Inbox pattern - recommended)
+  o4x-schema --with-inbox > migration.sql
 
-  # Generate both with custom names
-  o4x-schema --outbox my_outbox --with-consumer --consumer my_consumer_messages > migration.sql
+  # Custom table names
+  o4x-schema --outbox my_outbox --with-inbox --inbox my_inbox > migration.sql
 
   # Generate rollback SQL
   o4x-schema --rollback > rollback.sql
-  o4x-schema --rollback --with-consumer > rollback.sql
+  o4x-schema --rollback --with-inbox > rollback.sql
 `)
 	}
 
@@ -56,16 +56,16 @@ Examples:
 	var output string
 
 	if *rollback {
-		if *withConsumer {
-			output = schema.RollbackSQL(*outboxTable, *consumerTable)
-		} else {
-			output = schema.DropOutboxDDL(*outboxTable)
+		// Generate rollback (DROP) SQL
+		output = schema.DropOutboxDDL(*outboxTable)
+		if *withInbox {
+			output += "\n" + schema.DropConsumerInboxDDL(*inboxTable)
 		}
 	} else {
-		if *withConsumer {
-			output = schema.MigrationSQL(*outboxTable, *consumerTable)
-		} else {
-			output = schema.OutboxDDL(*outboxTable)
+		// Generate migration (CREATE) SQL
+		output = schema.OutboxDDL(*outboxTable)
+		if *withInbox {
+			output += "\n" + schema.ConsumerInboxDDL(*inboxTable)
 		}
 	}
 

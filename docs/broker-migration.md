@@ -710,17 +710,17 @@ FROM (
 
 **Alert if:** Kafka failure rate > 1% or > 2x SQS failure rate
 
-**3. Consumer Duplicate Rate**
+**3. Consumer Duplicate Processing**
 
 ```sql
--- Check consumer duplicate rate
+-- Check for duplicate processing via inbox
 SELECT
-    DATE_TRUNC('hour', created_at) AS hour,
+    DATE_TRUNC('hour', received_at) AS hour,
     COUNT(*) AS total_messages,
-    COUNT(*) FILTER (WHERE receive_count > 1) AS duplicates,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE receive_count > 1) / COUNT(*), 2) AS duplicate_rate_pct
-FROM consumer_messages
-WHERE created_at > NOW() - INTERVAL '24 hours'
+    COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+    COUNT(*) FILTER (WHERE status = 'processing') AS processing
+FROM consumer_inbox
+WHERE received_at > NOW() - INTERVAL '24 hours'
 GROUP BY 1
 ORDER BY 1 DESC;
 ```
@@ -728,13 +728,13 @@ ORDER BY 1 DESC;
 **Expected Output:**
 
 ```
-       hour         | total_messages | duplicates | duplicate_rate_pct
---------------------|----------------|------------|--------------------
- 2025-12-01 09:00   |           5420 |         12 |               0.22
- 2025-12-01 08:00   |           5380 |         15 |               0.28
+       hour         | total_messages | completed | processing
+--------------------|----------------|-----------|------------
+ 2025-12-01 09:00   |           5420 |      5408 |         12
+ 2025-12-01 08:00   |           5380 |      5365 |         15
 ```
 
-**Alert if:** Duplicate rate > 5% (indicates potential issue with idempotency)
+**Alert if:** processing count is high (indicates stuck messages or handler errors)
 
 **4. Publishing Latency**
 
@@ -810,10 +810,10 @@ ORDER BY topic, broker;
         ]
       },
       {
-        "title": "Duplicate Message Rate",
+        "title": "Consumer Processing Status",
         "targets": [
           {
-            "rawSql": "SELECT $__time(created_at), COUNT(*) FILTER (WHERE receive_count > 1)::float / COUNT(*) * 100 AS duplicate_rate FROM consumer_messages WHERE $__timeFilter(created_at) GROUP BY 1"
+            "rawSql": "SELECT $__time(received_at), status, COUNT(*) FROM consumer_inbox WHERE $__timeFilter(received_at) GROUP BY 1, 2"
           }
         ]
       }
@@ -835,16 +835,17 @@ ORDER BY topic, broker;
 **Diagnosis:**
 
 ```sql
--- Find messages being processed from both brokers
+-- Find messages being processed multiple times
 SELECT
-    c.message_id,
-    c.receive_count,
-    o1.status AS sqs_status,
-    o2.status AS kafka_status
-FROM consumer_messages c
-LEFT JOIN outbox_sqs o1 ON c.message_id = o1.idempotency_key
-LEFT JOIN outbox_kafka o2 ON c.message_id = o2.idempotency_key
-WHERE c.receive_count > 1
+    i.consumer_name,
+    i.message_id,
+    i.status,
+    i.received_at,
+    i.processed_at
+FROM consumer_inbox i
+WHERE i.status = 'processing'
+  AND i.received_at < NOW() - INTERVAL '5 minutes'
+ORDER BY i.received_at ASC
 LIMIT 100;
 ```
 

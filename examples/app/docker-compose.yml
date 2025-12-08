@@ -62,8 +62,9 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
       SQS_ENDPOINT: http://localstack:4566
-      SQS_QUEUE_URL: http://localstack:4566/000000000000/o4x-events.fifo
-      STANDARD_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-standard
+      ORDER_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-order.fifo
+      NOTIFICATION_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-notification
+      USER_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-user
       AWS_REGION: us-east-1
       HEALTH_PORT: 8080
     ports:
@@ -77,22 +78,83 @@ services:
       localstack:
         condition: service_healthy
 
-  consumer:
+  consumer-order:
     build:
       context: ../..
       dockerfile: examples/app/Dockerfile.consumer
-    container_name: o4x-app-consumer
+    container_name: o4x-app-consumer-order
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
       SQS_ENDPOINT: http://localstack:4566
-      SQS_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-standard
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-order.fifo
+      CONSUMER_GROUP: order
       AWS_REGION: us-east-1
       HEALTH_PORT: 8081
-      # メール送信を想定した処理時間
-      NOTIFICATION_EMAIL_SLEEP_MIN: 250ms
-      NOTIFICATION_EMAIL_SLEEP_MAX: 2s
+      # Fast processing for order events
+      ORDER_CREATED_SLEEP_MIN: 20ms
+      ORDER_CREATED_SLEEP_MAX: 80ms
+      ORDER_CONFIRMED_SLEEP_MIN: 10ms
+      ORDER_CONFIRMED_SLEEP_MAX: 40ms
     ports:
       - "18081:8081"
+    cpu_count: 1
+    mem_limit: 2g
+    mem_reservation: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  consumer-notification:
+    build:
+      context: ../..
+      dockerfile: examples/app/Dockerfile.consumer
+    container_name: o4x-app-consumer-notification
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-notification
+      CONSUMER_GROUP: notification
+      AWS_REGION: us-east-1
+      HEALTH_PORT: 8082
+      # Slower processing for external API calls
+      NOTIFICATION_EMAIL_SLEEP_MIN: 250ms
+      NOTIFICATION_EMAIL_SLEEP_MAX: 2s
+      NOTIFICATION_SMS_SLEEP_MIN: 100ms
+      NOTIFICATION_SMS_SLEEP_MAX: 500ms
+      NOTIFICATION_PUSH_SLEEP_MIN: 50ms
+      NOTIFICATION_PUSH_SLEEP_MAX: 300ms
+    ports:
+      - "18082:8082"
+    cpu_count: 2
+    mem_limit: 2g
+    mem_reservation: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  consumer-user:
+    build:
+      context: ../..
+      dockerfile: examples/app/Dockerfile.consumer
+    container_name: o4x-app-consumer-user
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-user
+      CONSUMER_GROUP: user
+      AWS_REGION: us-east-1
+      HEALTH_PORT: 8083
+      # Medium speed processing
+      USER_REGISTERED_SLEEP_MIN: 5ms
+      USER_REGISTERED_SLEEP_MAX: 20ms
+      USER_UPDATED_SLEEP_MIN: 10ms
+      USER_UPDATED_SLEEP_MAX: 30ms
+    ports:
+      - "18083:8083"
     cpu_count: 1
     mem_limit: 2g
     mem_reservation: 512m

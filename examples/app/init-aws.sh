@@ -4,14 +4,18 @@
 
 echo "Creating SQS queues..."
 
-# Create FIFO queue for order/inventory events (strict ordering)
+# Create FIFO queue for order events (strict ordering)
 awslocal sqs create-queue \
-  --queue-name o4x-events.fifo \
+  --queue-name o4x-events-order.fifo \
   --attributes FifoQueue=true,ContentBasedDeduplication=false
 
-# Create Standard queue for notifications and user events (higher throughput)
+# Create Standard queue for notification events (higher throughput)
 awslocal sqs create-queue \
-  --queue-name o4x-events-standard
+  --queue-name o4x-events-notification
+
+# Create Standard queue for user events (higher throughput)
+awslocal sqs create-queue \
+  --queue-name o4x-events-user
 
 echo "SQS queues created successfully"
 

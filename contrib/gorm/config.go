@@ -10,8 +10,8 @@ import (
 type Config struct {
 	// OutboxTableName is the name of the outbox table (default: "outbox")
 	OutboxTableName string
-	// ConsumerMessagesTableName is the name of the consumer messages table (default: "consumer_messages")
-	ConsumerMessagesTableName string
+	// InboxTableName is the name of the consumer inbox table (default: "consumer_inbox")
+	InboxTableName string
 	// RequeueBackoffBase is the base interval for exponential backoff (default: 1 second)
 	RequeueBackoffBase time.Duration
 	// RequeueBackoffMax is the maximum backoff interval (default: 1 hour)
@@ -24,10 +24,10 @@ type Option func(*Config)
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		OutboxTableName:           "outbox",
-		ConsumerMessagesTableName: "consumer_messages",
-		RequeueBackoffBase:        1 * time.Second,
-		RequeueBackoffMax:         1 * time.Hour,
+		OutboxTableName:    "outbox",
+		InboxTableName:     "consumer_inbox",
+		RequeueBackoffBase: 1 * time.Second,
+		RequeueBackoffMax:  1 * time.Hour,
 	}
 }
 
@@ -43,15 +43,15 @@ func WithOutboxTableName(name string) Option {
 	}
 }
 
-// WithConsumerMessagesTableName sets the consumer messages table name.
+// WithInboxTableName sets the consumer inbox table name.
 // The name must contain only alphanumeric characters, underscores, and optionally a schema prefix.
 // Panics if the name is invalid to prevent SQL injection.
-func WithConsumerMessagesTableName(name string) Option {
+func WithInboxTableName(name string) Option {
 	if err := core.ValidateTableName(name); err != nil {
 		panic(err)
 	}
 	return func(c *Config) {
-		c.ConsumerMessagesTableName = name
+		c.InboxTableName = name
 	}
 }
 

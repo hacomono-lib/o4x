@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,7 +25,8 @@ import (
 
 func main() {
 	// Command-line flags
-	fifo := flag.Bool("fifo", false, "Connect to FIFO queue (default: Standard queue)")
+	group := flag.String("group", "", "Consumer group (required): order, user, notification")
+	queueURL := flag.String("queue-url", "", "SQS queue URL (overrides SQS_QUEUE_URL env var)")
 	simulateFailure := flag.Bool("simulate-failure", false, "Simulate random failures for testing")
 	failureRate := flag.Float64("failure-rate", 0.3, "Failure rate for simulated failures (0.0-1.0)")
 	workerCount := flag.Int("workers", 2, "Number of worker goroutines")
@@ -41,16 +41,21 @@ func main() {
 
 	ctx := context.Background()
 
+	// Determine consumer group (env var overrides flag)
+	groupName := getEnv("CONSUMER_GROUP", *group)
+
 	// Configuration from environment
 	dbURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:15432/o4x?sslmode=disable")
 	sqsEndpoint := getEnv("SQS_ENDPOINT", "http://localhost:14566")
 
-	// Default: Standard queue, --fifo flag switches to FIFO queue
-	var sqsQueueURL string
-	if *fifo {
-		sqsQueueURL = getEnv("SQS_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events.fifo")
-	} else {
-		sqsQueueURL = getEnv("SQS_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-standard")
+	// Queue URL priority: flag > environment variable
+	sqsQueueURL := *queueURL
+	if sqsQueueURL == "" {
+		sqsQueueURL = getEnv("SQS_QUEUE_URL", "")
+	}
+	if sqsQueueURL == "" {
+		logger.Error("SQS queue URL is required (use --queue-url flag or SQS_QUEUE_URL env var)")
+		os.Exit(1)
 	}
 
 	awsRegion := getEnv("AWS_REGION", "us-east-1")
@@ -74,11 +79,12 @@ func main() {
 	// Truncate idempotency tables if requested (for development/testing)
 	if *truncateTables {
 		logger.Warn("truncating idempotency tables",
-			"tables", []string{"order_confirmations", "user_welcome_credits"},
+			"tables", []string{"order_confirmations", "user_welcome_credits", "consumer_inbox"},
 		)
 		_, err := pool.Exec(ctx, `
 			TRUNCATE TABLE order_confirmations;
 			TRUNCATE TABLE user_welcome_credits;
+			TRUNCATE TABLE consumer_inbox;
 		`)
 		if err != nil {
 			logger.Error("failed to truncate tables", "error", err)
@@ -102,30 +108,16 @@ func main() {
 	})
 
 	// Initialize repositories
-	consumerRepo := pgx.NewConsumerRepository(pool)
 	notificationRepo := repository.NewNotificationRepository(pool)
 	outboxRepo := pgx.NewOutboxRepository(pool)
+	inboxRepo := pgx.NewInboxRepository(pool)
 
 	// Initialize services
 	notificationService := service.NewNotificationService(pool, notificationRepo, outboxRepo)
 
-	// Revive stuck messages from previous crash
-	revived, err := consumerRepo.ReviveStuckConsuming(ctx)
-	if err != nil {
-		logger.Error("failed to revive stuck consuming messages", "error", err)
-		os.Exit(1)
-	}
-	if revived > 0 {
-		logger.Info("revived stuck consuming messages", "count", revived)
-	}
-
-	queueType := "Standard"
-	if *fifo {
-		queueType = "FIFO"
-	}
-	logger.Info("queue configuration",
-		"type", queueType,
-		"url", sqsQueueURL,
+	logger.Info("consumer configuration",
+		"group", groupName,
+		"queue_url", sqsQueueURL,
 		"worker_count", *workerCount,
 		"message_concurrency", *messageConcurrency,
 		"simulate_failure", *simulateFailure,
@@ -163,52 +155,56 @@ func main() {
 		Max: appconsumer.ParseSleepDuration(os.Getenv("NOTIFICATION_PUSH_SLEEP_MAX"), 100*time.Millisecond),
 	}
 
-	logger.Info("handler sleep configuration",
-		"order.created", fmt.Sprintf("%v-%v", orderCreatedSleep.Min, orderCreatedSleep.Max),
-		"order.confirmed", fmt.Sprintf("%v-%v", orderConfirmedSleep.Min, orderConfirmedSleep.Max),
-		"user.registered", fmt.Sprintf("%v-%v", userRegisteredSleep.Min, userRegisteredSleep.Max),
-		"user.updated", fmt.Sprintf("%v-%v", userUpdatedSleep.Min, userUpdatedSleep.Max),
-		"notification.email", fmt.Sprintf("%v-%v", notificationEmailSleep.Min, notificationEmailSleep.Max),
-		"notification.sms", fmt.Sprintf("%v-%v", notificationSMSSleep.Min, notificationSMSSleep.Max),
-		"notification.push", fmt.Sprintf("%v-%v", notificationPushSleep.Min, notificationPushSleep.Max),
-	)
-
-	// Initialize topic router with handlers
-	router := consumer.NewTopicRouter()
+	// Create router registry
+	registry := consumer.NewTopicRouterRegistry()
 
 	// Register order handlers
-	orderCreatedHandler := appconsumer.NewOrderCreatedHandler(pool, notificationService, logger, orderCreatedSleep)
-	orderConfirmedHandler := appconsumer.NewOrderConfirmedHandler(pool, logger, orderConfirmedSleep)
-	router.Register("order.created", orderCreatedHandler)
-	router.Register("order.confirmed", orderConfirmedHandler)
+	registry.RegisterGroup("order", func(r *consumer.TopicRouter) {
+		r.Register("order.created", appconsumer.NewOrderCreatedHandler(pool, notificationService, logger, orderCreatedSleep))
+		r.Register("order.confirmed", appconsumer.NewOrderConfirmedHandler(pool, inboxRepo, logger, orderConfirmedSleep))
+	})
 
 	// Register user handlers
-	userRegisteredHandler := appconsumer.NewUserRegisteredHandler(pool, logger, userRegisteredSleep)
-	userUpdatedHandler := appconsumer.NewUserUpdatedHandler(pool, logger, userUpdatedSleep)
-	router.Register("user.registered", userRegisteredHandler)
-	router.Register("user.updated", userUpdatedHandler)
+	registry.RegisterGroup("user", func(r *consumer.TopicRouter) {
+		r.Register("user.registered", appconsumer.NewUserRegisteredHandler(pool, inboxRepo, logger, userRegisteredSleep))
+		r.Register("user.updated", appconsumer.NewUserUpdatedHandler(pool, logger, userUpdatedSleep))
+	})
 
 	// Register notification handlers
-	notificationEmailHandler := appconsumer.NewNotificationEmailHandler(
-		pool, notificationRepo, logger, *simulateFailure, *failureRate, notificationEmailSleep,
-	)
-	notificationSMSHandler := appconsumer.NewNotificationSMSHandler(pool, logger, notificationSMSSleep)
-	notificationPushHandler := appconsumer.NewNotificationPushHandler(pool, logger, notificationPushSleep)
-	router.Register("notification.email", notificationEmailHandler)
-	router.Register("notification.sms", notificationSMSHandler)
-	router.Register("notification.push", notificationPushHandler)
+	registry.RegisterGroup("notification", func(r *consumer.TopicRouter) {
+		r.Register("notification.email", appconsumer.NewNotificationEmailHandler(
+			pool, inboxRepo, notificationRepo, logger, *simulateFailure, *failureRate, notificationEmailSleep,
+		))
+		r.Register("notification.sms", appconsumer.NewNotificationSMSHandler(pool, inboxRepo, logger, notificationSMSSleep))
+		r.Register("notification.push", appconsumer.NewNotificationPushHandler(pool, inboxRepo, logger, notificationPushSleep))
+	})
+
+	// Select router based on group
+	selectedRouter, ok := registry.GetRouter(groupName)
+	if !ok {
+		logger.Error("invalid consumer group",
+			"group", groupName,
+			"valid_groups", registry.ValidGroups())
+		os.Exit(1)
+	}
 
 	// Set fallback handler for unknown topics
-	router.SetFallback(consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
+	selectedRouter.SetFallback(consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
 		logger.Warn("unhandled topic",
 			"topic", msg.Topic,
 			"message_id", msg.MessageID,
+			"group", groupName,
 		)
 		return nil
 	}))
 
+	logger.Info("handler group registered",
+		"group", groupName,
+		"topics", selectedRouter.Topics(),
+	)
+
 	// Initialize consumer service
-	service := consumer.NewService(sqsClient, consumerRepo, router, consumer.ServiceConfig{
+	service := consumer.NewService(sqsClient, selectedRouter, consumer.ServiceConfig{
 		QueueURL:            sqsQueueURL,
 		MaxNumberOfMessages: 10,
 		WaitTimeSeconds:     20,

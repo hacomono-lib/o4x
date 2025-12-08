@@ -2,15 +2,43 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Table of Contents
+
+1. [What is o4x](#what-is-o4x)
+2. [Quick Start](#quick-start)
+   - [Build and Run Commands](#build-and-run-commands)
+   - [Environment Variables](#environment-variables)
+3. [Core Architecture](#core-architecture)
+   - [Layered Usage (3 Tiers)](#layered-usage-3-tiers)
+   - [State Machines: Outbox vs Inbox](#state-machines-outbox-vs-inbox)
+   - [Key Components](#key-components)
+   - [Database Tables](#database-tables)
+4. [SQS Integration](#sqs-integration)
+   - [Multi-Queue Routing](#multi-queue-routing)
+   - [Topic-based Routing vs Fan-Out](#topic-based-routing-vs-fan-out)
+   - [Standard vs FIFO Queues](#standard-vs-fifo-queues)
+5. [Consumer Patterns](#consumer-patterns)
+   - [Idempotency Strategy](#idempotency-strategy)
+   - [MessageConcurrency](#messageconcurrency)
+6. [Operational Guide](#operational-guide)
+   - [Startup Recovery](#startup-recovery)
+   - [Health Checks](#health-checks)
+   - [Testing and Linting](#testing-and-linting)
+   - [Constraints and Limits](#constraints-and-limits)
+
+---
+
 ## What is o4x
 
 o4x is a Transactional Outbox + SQS event delivery platform for Go. It provides reliable message delivery from PostgreSQL to SQS using the outbox pattern. The consumer component is SQS-specific and optional.
 
-## Build and Run Commands
+## Quick Start
+
+### Build and Run Commands
 
 **IMPORTANT**: After making any code changes, always run `make lint` to ensure code quality and catch potential issues before committing.
 
-### Using Makefile (recommended)
+**Using Makefile (recommended)**:
 
 ```bash
 make help             # Show all available commands
@@ -22,10 +50,10 @@ make lint             # Run golangci-lint (REQUIRED after code changes)
 make up               # Start local infrastructure (PostgreSQL + LocalStack)
 make down             # Stop local infrastructure
 make schema           # Generate outbox schema SQL
-make schema-consumer  # Generate schema SQL with consumer tables
+make schema-inbox     # Generate schema SQL with consumer_inbox table
 ```
 
-### Direct Commands
+**Direct Commands**:
 
 ```bash
 # Run single test
@@ -33,7 +61,7 @@ go test -run TestName ./path/to/package
 
 # Generate schema with options
 go run cmd/o4x-schema/main.go                     # Outbox only
-go run cmd/o4x-schema/main.go --with-consumer     # Outbox + consumer tables
+go run cmd/o4x-schema/main.go --with-inbox        # Outbox + consumer_inbox (recommended)
 go run cmd/o4x-schema/main.go --outbox my_outbox  # Custom table name
 go run cmd/o4x-schema/main.go --rollback          # Generate rollback SQL
 
@@ -43,17 +71,29 @@ go run examples/app/cmd/consumer/main.go
 go run examples/app/cmd/api/main.go
 ```
 
-## Architecture
+**Workflow**: Code → `make lint` → fix errors → `make test-short` → commit
 
-### Design Concept: Layered Usage
+### Environment Variables
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:15432/o4x?sslmode=disable
+SQS_ENDPOINT=http://localhost:14566
+AWS_REGION=us-east-1
+SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events      # Standard
+SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events.fifo # FIFO
+```
+
+## Core Architecture
+
+### Layered Usage (3 Tiers)
 
 o4x is designed for flexible adoption with three usage tiers:
 
 | Tier | Use Case | What to Import |
 |------|----------|----------------|
 | **1. Outbox Core Only** | Insert messages to outbox within business transactions. External system polls/publishes. | `contrib/pgx` or `contrib/gorm` (repository only) |
-| **2. Core + Publisher** | Full outbox pattern with built-in Dispatcher polling and publishing to SQS/Kafka. | Tier 1 + `core` (Dispatcher) + `contrib/sqs` |
-| **3. Core + Publisher + Consumer** | Complete event-driven system with SQS consumer tracking. | Tier 2 + `contrib/sqs/consumer` |
+| **2. Core + Publisher** | Full outbox pattern with built-in Dispatcher polling and publishing to SQS. | Tier 1 + `core` (Dispatcher) + `contrib/sqs` |
+| **3. Core + Publisher + Consumer** | Complete event-driven system with SQS consumer. | Tier 2 + `contrib/sqs/consumer` |
 
 **Tier 1: Outbox Core Only**
 ```go
@@ -75,14 +115,16 @@ dispatcher.Start(ctx)
 
 **Tier 3: Core + Publisher + Consumer**
 ```go
-consumerRepo := pgx.NewConsumerRepository(pool)  // optional, can be nil
-service := consumer.NewService(sqsClient, queueURL, handler, consumerRepo, config)
+service := consumer.NewService(sqsClient, handler, config)
 service.Start(ctx)
+
+// For idempotency, use InboxRepository in your handler
+inboxRepo := pgx.NewInboxRepository(pool)
 ```
 
-### Two Completely Separate State Machines
+### State Machines: Outbox vs Inbox
 
-**Critical**: Outbox (Publisher) and Consumer have independent state machines. Never mix them.
+**Critical**: Outbox (Publisher) and Inbox (Consumer) have independent state machines. Never mix them.
 
 **Outbox Status (5 states)** - Publisher/Dispatcher side:
 - `ENQUEUED` → `PUBLISHING` → `PUBLISHED`
@@ -96,16 +138,9 @@ service.Start(ctx)
 4. **Crash recovery**: PUBLISHING → (ReviveStuckPublishing) → FAILED
 5. **Oversized message**: ENQUEUED → PUBLISHING → DEAD (PermanentError, no retry)
 
-**Consumer Status (4 states)** - Consumer side only:
-- `CONSUMING` → `CONSUMED`
-- `CONSUMING` → `FAILED` → (retry via SQS visibility timeout)
-- `FAILED` → `DEAD` (when max_retries exceeded)
-
-**Key scenarios:**
-1. **Normal**: CONSUMING → CONSUMED → SQS message deleted
-2. **Retry**: CONSUMING → FAILED → (SQS visibility timeout) → retry
-3. **Max retries**: FAILED → DEAD → SQS message deleted (NOT moved to DLQ)
-4. **Crash recovery**: CONSUMING → (ReviveStuckConsuming) → FAILED
+**Inbox Status (2 states)** - Consumer side (idempotency):
+- `processing` → `completed`
+- Failed handlers → SQS retry via visibility timeout (status stays `processing`)
 
 **Operational actions for FAILED/DEAD messages:**
 
@@ -113,9 +148,7 @@ service.Start(ctx)
 
 **Outbox DEAD**: Alert immediately via OnMessageDead hook. Common causes: payload > 256KB, malformed data, invalid routing. Recovery: fix and re-enqueue, manual publish, or archive. Add validation before Insert.
 
-**Consumer FAILED**: Monitor alerts, auto-recovery via SQS visibility timeout. Query `error_message` and `receive_count`. Common causes: API timeout, DB issues, handler errors.
-
-**Consumer DEAD**: Alert via OnMessageDead hook. SQS message already deleted. Implement payload preservation in OnMessageDead for recovery. Options: manual re-publish, manual processing, or archive.
+**Consumer Handler Failures**: SQS handles retries via visibility timeout. If handler returns error, SQS redelivers message. Use `InboxRepository` to prevent duplicate processing. Configure SQS Dead Letter Queue (DLQ) for max retries handling.
 
 ### Key Components
 
@@ -135,37 +168,32 @@ service.Start(ctx)
 
 - **contrib/sqs/consumer/**: SQS message consumer (optional)
   - `Handler` interface with `TopicRouter` and `TypedHandler[T]` helpers
-  - `Repository` is optional (nil = no DB tracking)
-  - Repository purpose: Audit log and observability, NOT execution control
-  - Handler must be idempotent regardless of Repository usage
-  - **Point to Point design**: 1 Queue → 1 Consumer Service (see Fan-Out Pattern section for multi-handler scenarios)
+  - Handler must be idempotent (use `InboxRepository` or application-level idempotency)
+  - **Point to Point design**: 1 Queue → 1 Consumer Service
 
-- **contrib/pgx/**: PostgreSQL repository using pgx (includes BatchOutboxRepository)
-- **contrib/gorm/**: PostgreSQL repository using GORM (includes BatchOutboxRepository)
+- **contrib/pgx/**: PostgreSQL repository using pgx (includes BatchOutboxRepository and InboxRepository)
+- **contrib/gorm/**: PostgreSQL repository using GORM (includes BatchOutboxRepository and InboxRepository)
 - **schema/**: DDL generation helpers
 
 ### Database Tables
 
 **Outbox Table** (Publisher side):
-- `id` (UUID v7), `topic`, `payload` (JSONB), `idempotency_key`
+- `id` (UUID v7), `topic`, `payload` (JSONB), `metadata` (JSONB), `idempotency_key`
 - `status` (ENUM), `error_message`, `retry_count`, `max_retries`
 - `next_retry_at` (TIMESTAMPTZ), `created_at`, `updated_at`
 - Indexes: `idx_outbox_status_created_at`, `idx_outbox_status_next_retry_at`
 
-**Consumer Messages Table** (Consumer side, optional):
-- `id` (UUID v7), `outbox_id`, `message_id` (UNIQUE), `receipt_handle`
-- `status` (ENUM), `error_message`, `receive_count`, `max_retries`
-- `queue_url`, `processed_at`, `created_at`, `updated_at`
-- Tracks consumption state only, never updated by Publisher
-- **UNIQUE constraint on `message_id`**: 1 SQS Message = 1 Record (Point to Point design)
+**Consumer Inbox Table** (Consumer side, **RECOMMENDED** for idempotency):
+- **Primary Key**: `(consumer_name, message_id)` - Ensures exactly-once processing
+- `status` (TEXT: "processing", "completed"), `received_at`, `processed_at`
+- Index: `idx_consumer_inbox_status_received_at` (for cleanup queries)
+- Purpose: Atomic duplicate detection via composite primary key
+- Use `InboxRepository.TryStart()` and `Complete()` in handlers
+- Generate DDL: `make schema-inbox`
 
-### Startup Recovery
+## SQS Integration
 
-Call once at startup:
-- `OutboxRepository.ReviveStuckPublishing()` - PUBLISHING → FAILED (increments retry_count)
-- `ConsumerRepository.ReviveStuckConsuming()` - CONSUMING → FAILED
-
-### Multi-Queue Routing (SQS)
+### Multi-Queue Routing
 
 ```go
 router := sqs.NewTopicQueueMap("https://sqs.../default-queue")
@@ -174,7 +202,7 @@ router.RegisterPrefix("notification.", "https://sqs.../notifications") // Standa
 publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 ```
 
-**SQS Queue Type Selection:**
+### Standard vs FIFO Queues
 
 **Standard Queue**: Higher throughput, lower cost, no ordering, possible duplicates. Use for: notifications, logs, analytics.
 
@@ -216,96 +244,262 @@ Same message "order.created" processed by multiple handlers:
 - Purpose: Process the same message in multiple ways
 - 1 message → N Handlers
 
-### Fan-Out Pattern with SQS (Physical Queue Separation Required)
-
-**SQS Constraint**: Point to Point delivery (1 message → 1 consumer only).
-**Fan-Out is physically impossible** within a single SQS queue.
-
-**Why Composite Handler is NOT recommended with Repository**:
-```go
-// ❌ AVOID: Composite Handler with consumer_messages
-composite := &CompositeHandler{
-    handlers: []Handler{&EmailHandler{}, &SlackHandler{}, &MetricsHandler{}},
-}
-```
-
-**Problem**: `consumer_messages.status` is a single state (CONSUMING/CONSUMED/FAILED/DEAD).
-- If EmailHandler succeeds but SlackHandler fails → What status should be recorded?
-- CONSUMED → Loses SlackHandler failure information
-- FAILED → Ignores EmailHandler success
-- **Partial failures cannot be tracked accurately**
+**SQS Constraint**: Point to Point delivery (1 message → 1 consumer only). **Fan-Out is physically impossible** within a single SQS queue.
 
 **Recommended Fan-Out Architecture** (SNS + Multiple SQS Queues):
 ```
 Publisher → SNS Topic "order.created"
              ↓
-             ├→ SQS Queue "email-queue" → Consumer Service 1 (consumer_messages_email)
-             ├→ SQS Queue "slack-queue" → Consumer Service 2 (consumer_messages_slack)
-             └→ SQS Queue "metrics-queue" → Consumer Service 3 (consumer_messages_metrics)
+             ├→ SQS Queue "email-queue" → Consumer Service 1
+             ├→ SQS Queue "slack-queue" → Consumer Service 2
+             └→ SQS Queue "metrics-queue" → Consumer Service 3
 ```
 
 **Key Points**:
-1. **1 Queue → 1 Consumer Service** (separate processes)
-2. Each service has independent `consumer_messages` tracking (or separate tables)
+1. 1 Queue → 1 Consumer Service (separate processes)
+2. Each service tracks idempotency independently using `InboxRepository`
 3. Individual success/failure tracking per handler
 4. Failure in one consumer doesn't affect others
-5. Each consumer can have different retry policies and max_retries
 
-**Alternative without Repository**:
-If you don't need `consumer_messages` tracking, Composite Handler is acceptable:
-```go
-// ✅ OK: Composite Handler without Repository
-service := consumer.NewService(sqsClient, nil, compositeHandler, config)
-```
-However, you lose audit trail and observability for individual handler failures.
-
-**Other Messaging Systems (Out of Scope)**:
-- **Kinesis/Kafka**: True Pub/Sub (1 record → N consumers can read)
-  - Fan-Out is native: Multiple consumer applications read from 1 stream
-  - Each consumer app can use Topic-based Routing internally
-  - o4x is SQS-specific and does not support Kinesis/Kafka
-- If you need native Fan-Out, consider Kinesis/Kafka instead of SQS
+**Alternative**: Kinesis/Kafka (native Fan-Out, out of o4x scope)
 
 **Rule of Thumb**:
 - Topic-based Routing (different events) → Use `TopicRouter` with 1 SQS queue
-- Fan-Out (same event, multiple handlers) → Use SNS + multiple SQS queues OR consider Kinesis/Kafka
+- Fan-Out (same event, multiple handlers) → Use SNS + multiple SQS queues OR Kinesis/Kafka
 
-### Environment Variables
+## Consumer Patterns
 
+### Idempotency Strategy
+
+SQS provides at-least-once delivery, so handlers must be idempotent. Choose an approach:
+
+#### InboxRepository (Recommended)
+
+Use `consumer_inbox` table for database-level idempotency checking.
+
+**When to use**:
+- ✅ DB operations only (within transaction)
+- ✅ External API calls with idempotency key support
+- ❌ External APIs without idempotency support → **Don't use async messaging**
+
+**Transaction Pattern** (Recommended):
+
+```go
+func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    tx := h.db.Begin()
+    defer tx.Rollback()
+
+    // 1. Check idempotency (within transaction)
+    inboxTx := h.inboxRepo.WithTx(tx)
+    ok, err := inboxTx.TryStart(ctx, "OrderHandler", msg.MessageID)
+    if err != nil {
+        return err
+    }
+    if !ok {
+        return nil // Already completed (duplicate)
+    }
+
+    // 2. Business logic (same transaction)
+    var event OrderCreatedEvent
+    json.Unmarshal(msg.Body, &event)
+
+    if err := tx.Create(&Order{
+        ID:         event.OrderID,
+        CustomerID: event.CustomerID,
+        Amount:     event.Amount,
+    }).Error; err != nil {
+        return err
+    }
+
+    // 3. Mark completed
+    if err := inboxTx.Complete(ctx, "OrderHandler", msg.MessageID); err != nil {
+        return err
+    }
+
+    // 4. Commit (all or nothing)
+    return tx.Commit().Error
+}
 ```
-DATABASE_URL=postgres://postgres:postgres@localhost:15432/o4x?sslmode=disable
-SQS_ENDPOINT=http://localhost:14566
-AWS_REGION=us-east-1
-SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events      # Standard
-SQS_QUEUE_URL=http://localhost:14566/000000000000/o4x-events.fifo # FIFO
+
+**Why transaction is recommended**:
+- ✅ Protects non-idempotent business logic (e.g., `UPDATE counters SET count = count + 1`)
+- ✅ Multiple DB operations are atomic with inbox state
+- ✅ Crash during processing → full rollback → safe to retry
+
+**Auto-commit Pattern** (Only when fully idempotent):
+
+Use when ALL of these conditions are met:
+1. ✅ Business logic uses `ON CONFLICT DO NOTHING`
+2. ✅ External APIs support idempotency keys
+3. ✅ No multi-step DB operations requiring atomicity
+
+```go
+func (h *NotificationHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    // 1. Check idempotency (auto-commit)
+    ok, err := h.inboxRepo.TryStart(ctx, "NotificationHandler", msg.MessageID)
+    if err != nil {
+        return err
+    }
+    if !ok {
+        return nil // Already completed
+    }
+
+    // 2. Idempotent DB operation (auto-commit)
+    h.db.Exec(`INSERT INTO notifications (user_id, message_id, content)
+               VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING`,
+               event.UserID, msg.MessageID, event.Content)
+
+    // 3. Call external API with idempotency key
+    if err := h.emailClient.Send(EmailRequest{
+        To:             event.Email,
+        IdempotencyKey: msg.MessageID, // ← API handles duplicates
+    }); err != nil {
+        return err
+    }
+
+    // 4. Mark completed (auto-commit)
+    return h.inboxRepo.Complete(ctx, "NotificationHandler", msg.MessageID)
+}
 ```
 
-### Important Constraints and Limits
+**Retry scenarios comparison**:
 
-**SQS Message Size**: 256 KB hard limit. Oversized messages → DEAD (no retry).
+| Scenario | Transaction | Auto-commit |
+|----------|-------------|-------------|
+| Crash after TryStart, before business logic | Rollback → Retry safe | Inbox record exists → TryStart returns true → Retry safe |
+| Crash after business logic, before Complete | Rollback → Retry safe | **Depends on business logic idempotency** |
+| Business logic fails | Rollback → Retry safe | **May leave inbox in 'processing' state** |
 
-**BatchDispatcher Configuration**:
-- RequeueInterval: Default 10s (0 = no auto-retry)
-- Exponential backoff: `baseInterval * 2^retry_count`, capped at maxInterval
+**Recommendation**: Use transaction pattern unless you have specific performance requirements and can guarantee full idempotency.
 
-**Graceful Shutdown**: Context cancellation respected, 10s timeout for DB cleanup.
+#### Application-Level Idempotency
 
-**At-least-once Delivery**: Duplicates possible. Handlers MUST be idempotent.
+Use when InboxRepository overhead is not justified (e.g., simple analytics, logging).
 
-**Batch Operations**: `UpdateBatchToPublished` returns success count. Partial success allowed.
+**Strategies**:
+1. **DB Unique Constraint**: `ON CONFLICT (message_id) DO NOTHING`
+2. **Redis Cache**: `SetNX` with TTL for fast deduplication
+3. **Business Data Check**: Query if operation already completed
 
-**Database Cleanup**: Use `OutboxCleaner.DeleteOlderThan()` periodically (PUBLISHED > 7d, DEAD > 30d).
+**Example**:
+```go
+func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    tx := h.db.Begin()
+    defer tx.Rollback()
 
-### Testing and Linting
+    // Idempotent insert
+    result := tx.Exec(`INSERT INTO orders (id, customer_id, message_id)
+                       VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING`,
+                       event.OrderID, event.CustomerID, msg.MessageID)
 
-- `make test-short` - Unit tests (no DB)
-- `make test` - Full tests with DB (requires `make up`)
-- `make test-coverage` - Generate coverage.html
-- `make lint` - **REQUIRED** after code changes
+    if result.RowsAffected == 0 {
+        return nil // Already processed
+    }
 
-**Workflow**: Code → `make lint` → fix errors → `make test-short` → commit
+    // Process new order
+    if err := h.processNewOrder(tx, event); err != nil {
+        return err
+    }
 
-### Health Check Endpoints
+    return tx.Commit()
+}
+```
+
+#### External APIs Without Idempotency Support
+
+**Don't use asynchronous message processing**. Creating a send queue table defeats the purpose of using o4x.
+
+**Your options**:
+1. **Switch to an idempotent API** ✅ (Recommended) - Stripe, Twilio, SendGrid, AWS SES
+2. **Accept duplicate calls** ⚠️ - If duplicates are tolerable (e.g., notification emails)
+3. **Call API synchronously** ⚠️ - Within application transaction (loses async benefits)
+
+**Bottom line**: Non-idempotent APIs are fundamentally incompatible with at-least-once delivery semantics. Fix the API, not the pattern.
+
+#### Decision Tree
+
+1. **Does your handler involve external API calls?**
+   - YES → Does the API support idempotency keys?
+     - YES → Use **InboxRepository** + pass message_id as idempotency key ✅
+     - NO → **Don't use async messaging** ⛔
+   - NO → Continue to step 2
+
+2. **Is your business logic fully idempotent?** (ON CONFLICT DO NOTHING, etc.)
+   - YES → Use **InboxRepository with auto-commit** OR **Application-Level** ✅
+   - NO → Use **InboxRepository with transaction** ✅ (safest)
+
+#### Comparison Table
+
+| Approach | Idempotency | Audit Trail | Complexity | Recommended For |
+|----------|-------------|-------------|------------|-----------------|
+| **InboxRepository (Transaction)** | ✅ Built-in | ✅ Processing status | Low | **DB operations** + **API calls with idempotency keys** |
+| **InboxRepository (Auto-commit)** | ✅ Built-in | ✅ Processing status | Low | **Idempotent business logic** + **API with idempotency keys** |
+| **Application-Level** | ✅ Custom logic | ⚠️ Custom | Medium | **Pure DB operations** (when InboxRepository overhead not justified) |
+
+#### Best Practices
+
+1. **DB operations only**: Use `InboxRepository` with transaction ✅
+2. **External API with idempotency key support**: Use `InboxRepository` ✅
+3. **External API without idempotency support**: **Don't use async messaging** ⛔
+4. **Prefer transaction pattern**: Safer default unless performance is critical
+5. Set cleanup TTLs via `InboxCleaner.DeleteOlderThan()` (completed: 7-30d, processing: 30-90d)
+6. Monitor stuck messages in 'processing' status (indicates handler crashes)
+7. **Important**: Return `nil` on duplicates, not an error
+
+### MessageConcurrency
+
+Parallel message processing within workers. Only for Standard queues (NOT FIFO).
+
+```go
+service := consumer.NewService(sqsClient, handler, consumer.ServiceConfig{
+    QueueURL:           queueURL,
+    WorkerCount:        5,
+    MessageConcurrency: 10, // Process 10 messages concurrently per worker
+})
+```
+
+**Key Concepts**:
+- **Sequential** (MessageConcurrency=1): Default, safe for all queue types
+- **Parallel** (MessageConcurrency>1): Only for Standard queues
+- **Total parallelism**: `WorkerCount * MessageConcurrency` (e.g., 5 * 10 = 50 concurrent messages)
+- **FIFO validation**: Service.Start() returns error if MessageConcurrency>1 with FIFO queue
+
+**When to Use**:
+- Standard queues only (FIFO requires MessageConcurrency=1)
+- Fast handlers (<100ms processing time)
+- High throughput requirements (>1000 msg/sec)
+- I/O-bound operations (DB queries, HTTP calls)
+
+**Important Considerations**:
+1. **Database Connections**: Ensure `maxConns >= WorkerCount * MessageConcurrency + margin`
+2. **Memory**: Each goroutine consumes memory
+3. **Handler Idempotency**: Critical with parallel processing
+4. **Monitoring**: Track processing time, error rates, DB connection pool usage
+
+**Performance Tuning**:
+```go
+// Low throughput, ordered processing (FIFO)
+WorkerCount: 2, MessageConcurrency: 1
+
+// Moderate throughput (Standard)
+WorkerCount: 5, MessageConcurrency: 5  // 25 concurrent messages
+
+// High throughput (Standard)
+WorkerCount: 10, MessageConcurrency: 10 // 100 concurrent messages
+```
+
+## Operational Guide
+
+### Startup Recovery
+
+Call once at startup:
+- `OutboxRepository.ReviveStuckPublishing()` - PUBLISHING → FAILED (increments retry_count)
+
+Consumer side:
+- No manual recovery needed
+- Messages with status=`processing` in `consumer_inbox` naturally retry when SQS redelivers
+
+### Health Checks
 
 o4x provides health status APIs for containerized environments:
 
@@ -321,132 +515,25 @@ status.IsStale(5 * time.Minute)  // no messages processed in 5min
 - `/ready` endpoint - readiness probe (traffic routing)
 - See `examples/app/cmd/dispatcher/main.go` for full example
 
-### Idempotency Implementation
+### Testing and Linting
 
-Consumer `Repository` is **optional**. Two approaches:
+- `make test-short` - Unit tests (no DB)
+- `make test` - Full tests with DB (requires `make up`)
+- `make test-coverage` - Generate coverage.html
+- `make lint` - **REQUIRED** after code changes
 
-#### Approach 1: With Consumer Repository (DB-Tracked)
+### Constraints and Limits
 
-```go
-consumerRepo := pgx.NewConsumerRepository(pool)
-service := consumer.NewService(sqsClient, consumerRepo, handler, config)
-```
+**SQS Message Size**: 256 KB hard limit. Oversized messages → DEAD (no retry).
 
-**How it works**: Tracks all messages in `consumer_messages` table with status transitions.
+**BatchDispatcher Configuration**:
+- RequeueInterval: Default 10s (0 = no auto-retry)
+- Exponential backoff: `baseInterval * 2^retry_count`, capped at maxInterval
 
-**Benefits**: Audit trail, failure investigation, crash recovery, metrics.
+**Graceful Shutdown**: Context cancellation respected, 10s timeout for DB cleanup.
 
-**Important**:
-- Handler still called on duplicates - must be idempotent
-- Handler and Consumer use SEPARATE transactions
-- Handler manages its own transaction for business data
+**At-least-once Delivery**: Duplicates possible. Handlers MUST be idempotent.
 
-**Example with Business Idempotency**:
-```go
-func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    tx, _ := h.db.Begin(ctx)
-    defer tx.Rollback(ctx)
+**Batch Operations**: `UpdateBatchToPublished` returns success count. Partial success allowed.
 
-    // Idempotent insert
-    query := `INSERT INTO orders (id, customer_id, message_id)
-              VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING`
-    result, _ := tx.ExecContext(ctx, query, event.OrderID, event.CustomerID, msg.MessageID)
-
-    if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
-        return nil // Already processed
-    }
-
-    // Process new order
-    if err := h.processNewOrder(ctx, tx, event); err != nil {
-        return err
-    }
-
-    return tx.Commit(ctx)
-}
-```
-
-#### Approach 2: Without Consumer Repository (Application-Level)
-
-```go
-service := consumer.NewService(sqsClient, nil, handler, config)
-```
-
-**Strategies**:
-
-1. **DB Unique Constraint** (Recommended): `ON CONFLICT (message_id) DO NOTHING`
-2. **Redis Cache**: `SetNX` with TTL for fast deduplication
-3. **Business Data Check**: Query if operation already completed
-4. **Hybrid**: Redis for fast check + DB for permanent record
-
-**Strategy Selection**:
-- Financial transactions → DB Unique Constraint (+ Repository for audit)
-- Notifications/emails → Redis Cache
-- Analytics → Business Data Check
-- Compliance-critical → Repository + DB Unique Constraint
-
-**Best Practices**:
-1. Always implement handler-level idempotency (at-least-once delivery)
-2. Use Repository for audit trail and monitoring needs
-3. Set appropriate TTLs (Redis: 10-30min, cleanup: CONSUMED 7d, DEAD 30d)
-4. Use DB transactions for multi-step operations
-5. Monitor duplicate rates and alert on anomalies
-
-### MessageConcurrency (Parallel Processing within Workers)
-
-The consumer supports parallel message processing within each worker via `MessageConcurrency` config:
-
-```go
-service := consumer.NewService(sqsClient, repo, handler, consumer.ServiceConfig{
-    QueueURL:           queueURL,
-    WorkerCount:        5,
-    MessageConcurrency: 10, // Process 10 messages concurrently per worker
-})
-```
-
-**Key Concepts**:
-- **Sequential** (MessageConcurrency=1): Default, safe for all queue types
-- **Parallel** (MessageConcurrency>1): Only for Standard queues, NOT FIFO
-- **Total parallelism**: `WorkerCount * MessageConcurrency` (e.g., 5 * 10 = 50 concurrent messages)
-- **FIFO validation**: Service.Start() returns error if MessageConcurrency>1 with FIFO queue (detected via `.fifo` suffix)
-
-**Implementation Details**:
-- Sequential path: Simple for loop over messages (existing behavior)
-- Parallel path: Semaphore (buffered channel) + sync.WaitGroup pattern
-- Graceful shutdown: Context cancellation checked before starting each goroutine
-- Labeled break: Properly exits loop when context cancelled during semaphore acquisition
-
-**When to Use**:
-- **Standard queues only** (FIFO requires MessageConcurrency=1 for ordering)
-- Fast handlers (<100ms processing time)
-- High throughput requirements (>1000 msg/sec)
-- I/O-bound operations (DB queries, HTTP calls)
-
-**Performance Tuning**:
-```go
-// Low throughput, ordered processing (FIFO)
-WorkerCount:        2
-MessageConcurrency: 1  // Must be 1 for FIFO
-
-// Moderate throughput (Standard)
-WorkerCount:        5
-MessageConcurrency: 5  // 25 concurrent messages
-
-// High throughput (Standard)
-WorkerCount:        10
-MessageConcurrency: 10 // 100 concurrent messages
-```
-
-**Important Considerations**:
-1. **Database Connections**: Ensure pgxpool has sufficient connections: `maxConns >= WorkerCount * MessageConcurrency + margin`
-2. **Memory**: Each goroutine consumes memory (handler state + message payload)
-3. **Handler Idempotency**: Critical with parallel processing (potential out-of-order execution)
-4. **Monitoring**: Track processing time, error rates, and DB connection pool usage
-
-**Example** (see examples/app/cmd/consumer/main.go):
-```bash
-# Standard queue with parallel processing
-go run cmd/consumer/main.go --workers 5 --message-concurrency 10
-
-# FIFO queue (MessageConcurrency must be 1)
-go run cmd/consumer/main.go --fifo --workers 2 --message-concurrency 1
-```
+**Database Cleanup**: Use `OutboxCleaner.DeleteOlderThan()` and `InboxCleaner.DeleteOlderThan()` periodically (PUBLISHED > 7d, DEAD > 30d, completed > 7d, processing > 30d).

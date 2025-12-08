@@ -83,7 +83,6 @@ func isFIFO(queueURL string) bool {
 // Service is the main consumer service that polls SQS and processes messages
 type Service struct {
 	sqsClient       SQSClient
-	repo            Repository // Optional: can be nil
 	handler         Handler
 	config          ServiceConfig
 	cancelFunc      context.CancelFunc // Cancel function for graceful shutdown
@@ -96,19 +95,14 @@ type Service struct {
 
 // NewService creates a new consumer service.
 //
-// If repo is nil, a NopRepository will be used automatically.
-// This allows the consumer to function without a database, relying solely on
-// SQS visibility timeout and DLQ for retry handling.
+// The service polls SQS, calls the handler, and manages retries via SQS visibility timeout.
+// For idempotency, use InboxRepository within your handler implementation.
 //
-// Example with database:
+// Example:
 //
-//	repo := pgx.NewConsumerRepository(pool)
-//	service := consumer.NewService(sqsClient, repo, handler, config)
-//
-// Example without database:
-//
-//	service := consumer.NewService(sqsClient, nil, handler, config)
-func NewService(sqsClient SQSClient, repo Repository, handler Handler, config ServiceConfig) *Service {
+//	service := consumer.NewService(sqsClient, handler, config)
+//	service.Start(ctx)
+func NewService(sqsClient SQSClient, handler Handler, config ServiceConfig) *Service {
 	if config.MaxNumberOfMessages == 0 {
 		config.MaxNumberOfMessages = 10
 	}
@@ -140,14 +134,8 @@ func NewService(sqsClient SQSClient, repo Repository, handler Handler, config Se
 		config.MessageConcurrency = 1
 	}
 
-	// Use NopRepository if repo is nil (Null Object Pattern)
-	if repo == nil {
-		repo = NewNopRepository()
-	}
-
 	return &Service{
 		sqsClient: sqsClient,
-		repo:      repo,
 		handler:   handler,
 		config:    config,
 	}
@@ -176,7 +164,6 @@ func (s *Service) Start(ctx context.Context) error {
 	s.config.Logger.InfoContext(ctx, "starting consumer service",
 		"queue_url", s.config.QueueURL,
 		"worker_count", s.config.WorkerCount,
-		"repository_enabled", s.repo != nil,
 	)
 
 	for i := 0; i < s.config.WorkerCount; i++ {
@@ -343,41 +330,18 @@ messageLoop:
 //
 // Flow:
 //  1. Parse SQS message into SQSMessage
-//  2. Insert into consumer_messages with status=CONSUMING (or no-op if using NopRepository)
-//  3. Call handler.Handle(payload)
-//  4. Success: Mark as CONSUMED, then DeleteMessage from SQS
-//  5. Error: receive_count < max_retries -> FAILED, else -> DEAD
+//  2. Call handler.Handle(payload) - handler must implement idempotency via InboxRepository
+//  3. Success: DeleteMessage from SQS
+//  4. Error: Let SQS retry via visibility timeout or delete if max retries exceeded
 //
-// Note: The repository may be a NopRepository (Null Object Pattern) which performs no actual
-// persistence but allows the same code path to be used regardless of database usage.
-//
-// Important: Consumer NEVER updates outbox.status
+// Important: Handler MUST be idempotent. Use InboxRepository or application-level
+// idempotency (message_id column) to prevent duplicate processing.
 func (s *Service) processMessage(ctx context.Context, sqsMsg sqstypes.Message, logger *slog.Logger) {
 	// Parse message
 	msg := s.parseSQSMessage(sqsMsg)
 	logger = logger.With("message_id", msg.MessageID, "topic", msg.Topic)
 
 	logger.DebugContext(ctx, "processing message")
-
-	s.processMessageInternal(ctx, msg, logger)
-}
-
-// processMessageInternal processes a message using the repository (which may be NopRepository).
-// This unified implementation works for both database-backed and no-database scenarios.
-func (s *Service) processMessageInternal(ctx context.Context, msg *SQSMessage, logger *slog.Logger) {
-	// Record in consumer_messages with CONSUMING status
-	consumerMsg, err := s.repo.InsertOrUpdate(ctx, ConsumerMessageInsertParams{
-		OutboxID:      msg.OutboxID,
-		MessageID:     msg.MessageID,
-		ReceiptHandle: msg.ReceiptHandle,
-		ReceiveCount:  msg.ReceiveCount,
-		QueueURL:      s.config.QueueURL,
-		MaxRetries:    s.config.MaxRetries,
-	})
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to record message", "error", err)
-		return
-	}
 
 	// Hook: OnConsumeStart
 	s.config.Hooks.callOnConsumeStart(ctx, msg)
@@ -389,34 +353,21 @@ func (s *Service) processMessageInternal(ctx context.Context, msg *SQSMessage, l
 
 	// Handle result
 	if handleErr != nil {
-		s.handleFailureInternal(ctx, consumerMsg, msg, handleErr, duration, logger)
+		s.handleFailure(ctx, msg, handleErr, duration, logger)
 		return
 	}
 
-	// Success: First mark as CONSUMED in DB, then delete from SQS
-	// This order is important: if DeleteMessage fails after CONSUMED, the message
-	// may be redelivered by SQS but can be safely ignored via idempotency check
-	// (the handler should be idempotent anyway).
-	// If we delete first and then UpdateToConsumed fails, DB remains CONSUMING
-	// which is incorrect since the message won't be redelivered.
-	if err := s.repo.UpdateToConsumed(ctx, consumerMsg.ID); err != nil {
-		logger.ErrorContext(ctx, "failed to update to CONSUMED", "error", err)
-		// Don't delete from SQS - let it be redelivered
-		return
-	}
-
-	// Now delete from SQS
+	// Success: Delete from SQS
 	_, deleteErr := s.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(s.config.QueueURL),
 		ReceiptHandle: aws.String(msg.ReceiptHandle),
 	})
 	if deleteErr != nil {
-		// DB is already CONSUMED, so even if redelivered, handler should be idempotent
 		logger.WarnContext(ctx, "failed to delete message from SQS (message processed but may be redelivered)",
 			"error", deleteErr)
 		// Hook: OnDeleteFailure
 		s.config.Hooks.callOnDeleteFailure(ctx, msg, deleteErr)
-		// Continue - the message is logically consumed
+		// Continue - handler should be idempotent
 	}
 
 	// Hook: OnConsumeSuccess
@@ -431,24 +382,21 @@ func (s *Service) processMessageInternal(ctx context.Context, msg *SQSMessage, l
 	s.mu.Unlock()
 }
 
-// handleFailureInternal handles a failed message processing attempt.
-// Works with both real repositories and NoOpRepository.
-func (s *Service) handleFailureInternal(ctx context.Context, consumerMsg *ConsumerMessage, msg *SQSMessage, handleErr error, duration time.Duration, logger *slog.Logger) {
+// handleFailure handles a failed message processing attempt.
+func (s *Service) handleFailure(ctx context.Context, msg *SQSMessage, handleErr error, duration time.Duration, logger *slog.Logger) {
 	errMsg := core.TruncateErrorMessage(handleErr.Error())
 
 	// Check if max retries exceeded
-	if consumerMsg.ReceiveCount >= s.config.MaxRetries {
-		logger.WarnContext(ctx, "message marked as DEAD",
+	if msg.ReceiveCount >= s.config.MaxRetries {
+		logger.WarnContext(ctx, "max retries exceeded, deleting message",
 			"error", errMsg,
-			"receive_count", consumerMsg.ReceiveCount,
+			"receive_count", msg.ReceiveCount,
 			"max_retries", s.config.MaxRetries,
 		)
 		// Hook: OnMessageDead
 		s.config.Hooks.callOnMessageDead(ctx, msg, handleErr)
-		if err := s.repo.UpdateToDead(ctx, consumerMsg.ID, errMsg); err != nil {
-			logger.ErrorContext(ctx, "failed to update to DEAD", "error", err)
-		}
 		// Delete from SQS to prevent further processing
+		// Configure SQS Dead Letter Queue (DLQ) if you need to preserve these messages
 		_, _ = s.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 			QueueUrl:      aws.String(s.config.QueueURL),
 			ReceiptHandle: aws.String(msg.ReceiptHandle),
@@ -459,15 +407,12 @@ func (s *Service) handleFailureInternal(ctx context.Context, consumerMsg *Consum
 	// Hook: OnConsumeFailure (retryable)
 	s.config.Hooks.callOnConsumeFailure(ctx, msg, handleErr, duration, true)
 
-	// Mark as FAILED - message will be redelivered by SQS after visibility timeout
-	logger.WarnContext(ctx, "message marked as FAILED",
+	// Message will be redelivered by SQS after visibility timeout
+	logger.WarnContext(ctx, "message processing failed, will retry",
 		"error", errMsg,
-		"receive_count", consumerMsg.ReceiveCount,
+		"receive_count", msg.ReceiveCount,
 		"max_retries", s.config.MaxRetries,
 	)
-	if err := s.repo.UpdateToFailed(ctx, consumerMsg.ID, errMsg); err != nil {
-		logger.ErrorContext(ctx, "failed to update to FAILED", "error", err)
-	}
 }
 
 // parseSQSMessage converts an SQS message to our internal format

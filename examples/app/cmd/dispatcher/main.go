@@ -37,8 +37,9 @@ func main() {
 	// Configuration from environment
 	dbURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:15432/o4x?sslmode=disable")
 	sqsEndpoint := getEnv("SQS_ENDPOINT", "http://localhost:14566")
-	sqsQueueURL := getEnv("SQS_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events.fifo")
-	standardQueueURL := getEnv("STANDARD_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-standard")
+	orderQueueURL := getEnv("ORDER_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-order.fifo")
+	notificationQueueURL := getEnv("NOTIFICATION_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-notification")
+	userQueueURL := getEnv("USER_QUEUE_URL", "http://localhost:14566/000000000000/o4x-events-user")
 	awsRegion := getEnv("AWS_REGION", "us-east-1")
 	healthPort := getEnv("HEALTH_PORT", "8080")
 	pollInterval := 100 * time.Millisecond
@@ -81,30 +82,29 @@ func main() {
 		// Multi-queue mode: route topics to different queues
 		logger.Info("multi-queue mode enabled")
 
-		// Create topic-to-queue router
-		router := sqspub.NewTopicQueueMap(standardQueueURL)
+		// Create topic-to-queue router (default to user queue)
+		router := sqspub.NewTopicQueueMap(userQueueURL)
 
-		// Route order/inventory topics to FIFO queue (strict ordering)
-		router.RegisterPrefix("order.", sqsQueueURL)
-		router.RegisterPrefix("inventory.", sqsQueueURL)
+		// Route order topics to FIFO queue (strict ordering)
+		router.RegisterPrefix("order.", orderQueueURL)
 
-		// Route notification topics to Standard queue (higher throughput)
-		router.RegisterPrefix("notification.", standardQueueURL)
+		// Route notification topics to notification queue (higher throughput)
+		router.RegisterPrefix("notification.", notificationQueueURL)
 
-		// User events go to Standard queue (default)
+		// Route user topics to user queue
+		router.RegisterPrefix("user.", userQueueURL)
 
 		logger.Info("multi-queue routing configured",
-			"default_queue", standardQueueURL,
-			"fifo_queue", sqsQueueURL,
-			"fifo_prefixes", []string{"order.", "inventory."},
-			"standard_prefixes", []string{"notification."},
+			"order_queue", orderQueueURL,
+			"notification_queue", notificationQueueURL,
+			"user_queue", userQueueURL,
 		)
 
 		publisher = sqspub.NewMultiQueuePublisher(sqsClient, router)
 	} else {
-		// Single queue mode
-		logger.Info("single queue mode", "queue_url", sqsQueueURL)
-		publisher = sqspub.NewPublisher(sqsClient, sqsQueueURL)
+		// Single queue mode: all messages go to the order queue (default)
+		logger.Info("single queue mode", "queue_url", orderQueueURL)
+		publisher = sqspub.NewBatchPublisher(sqsClient, orderQueueURL)
 	}
 
 	// Revive stuck messages from previous crash

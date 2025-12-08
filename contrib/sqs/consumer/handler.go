@@ -74,6 +74,15 @@ func (r *TopicRouter) SetUnknownTopicBehavior(behavior UnknownTopicBehavior) {
 	r.unknownTopicBehavior = behavior
 }
 
+// Topics returns the list of registered topics
+func (r *TopicRouter) Topics() []string {
+	topics := make([]string, 0, len(r.handlers))
+	for topic := range r.handlers {
+		topics = append(topics, topic)
+	}
+	return topics
+}
+
 // Handle routes the message to the appropriate handler
 func (r *TopicRouter) Handle(ctx context.Context, msg *SQSMessage) error {
 	handler, ok := r.handlers[msg.Topic]
@@ -94,11 +103,11 @@ func (r *TopicRouter) Handle(ctx context.Context, msg *SQSMessage) error {
 
 // TypedHandler wraps a handler that works with a specific message type
 type TypedHandler[T any] struct {
-	fn func(ctx context.Context, topic string, payload T) error
+	fn func(ctx context.Context, msg *SQSMessage, payload T) error
 }
 
 // NewTypedHandler creates a handler that unmarshals the payload to type T
-func NewTypedHandler[T any](fn func(ctx context.Context, topic string, payload T) error) *TypedHandler[T] {
+func NewTypedHandler[T any](fn func(ctx context.Context, msg *SQSMessage, payload T) error) *TypedHandler[T] {
 	return &TypedHandler[T]{fn: fn}
 }
 
@@ -110,5 +119,5 @@ func (h *TypedHandler[T]) Handle(ctx context.Context, msg *SQSMessage) error {
 		// JSON unmarshal errors are permanent - retrying won't fix malformed data
 		return core.NewPermanentError(fmt.Errorf("failed to unmarshal message body: %w", err))
 	}
-	return h.fn(ctx, msg.Topic, payload)
+	return h.fn(ctx, msg, payload)
 }

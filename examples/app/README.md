@@ -33,7 +33,7 @@ This sample application showcases a real-world implementation of the outbox patt
 
 **o4x Core Tables** (required):
 - `outbox` - Transactional outbox for publishing events
-- `consumer_messages` - Consumer message tracking (optional, for observability)
+- `consumer_inbox` - Idempotency store for exactly-once message processing (optional)
 
 **Application Tables** (business data):
 - `users` - User accounts
@@ -61,8 +61,53 @@ This sample application showcases a real-world implementation of the outbox patt
 3. **Consumer** (`cmd/consumer`)
    - Receives messages from SQS
    - Routes to appropriate handlers by topic
+   - Supports handler grouping for independent scaling
    - Tracks consumption state (optional)
    - Implements idempotent processing
+
+## Handler Groups
+
+The consumer supports **handler grouping** for independent scaling and resource optimization:
+
+### Available Groups
+
+- **`order`** - Order-related events (FIFO queue)
+  - `order.created`
+  - `order.confirmed`
+
+- **`notification`** - Notification events (Standard queue)
+  - `notification.email`
+  - `notification.sms`
+  - `notification.push`
+
+- **`user`** - User-related events (Standard queue)
+  - `user.registered`
+  - `user.updated`
+
+### Usage
+
+**Via command-line flag:**
+```bash
+go run cmd/consumer/main.go --group=order
+go run cmd/consumer/main.go --group=notification --workers=5
+```
+
+**Via environment variable:**
+```bash
+CONSUMER_GROUP=order go run cmd/consumer/main.go
+```
+
+**Docker deployment** (see docker-compose.yml):
+- `consumer-order` - Handles order events from FIFO queue
+- `consumer-notification` - Handles notifications from Standard queue (higher concurrency)
+- `consumer-user` - Handles user events from Standard queue
+
+### Benefits
+
+1. **Independent Scaling**: Scale notification workers independently from order workers
+2. **Resource Optimization**: Allocate more CPU/workers to slow handlers (e.g., external API calls)
+3. **Failure Isolation**: Notification failures don't affect order processing
+4. **Queue Affinity**: Each group connects to its appropriate queue (FIFO vs Standard)
 
 ## Features Demonstrated
 
@@ -138,18 +183,36 @@ go run cmd/dispatcher/main.go --multi-queue --workers 2
 # Health check: http://localhost:8080/health
 ```
 
-5. **Start consumer**:
+5. **Start consumer** (with handler group):
 ```bash
+# Order consumer (FIFO queue)
+CONSUMER_GROUP=order SQS_QUEUE_URL=http://localhost:24566/000000000000/o4x-events.fifo \
 go run cmd/consumer/main.go --workers 2
-# Health check: http://localhost:8081/health
+
+# Notification consumer (Standard queue)
+CONSUMER_GROUP=notification SQS_QUEUE_URL=http://localhost:24566/000000000000/o4x-events-standard \
+go run cmd/consumer/main.go --workers 5
+
+# User consumer (Standard queue)
+CONSUMER_GROUP=user SQS_QUEUE_URL=http://localhost:24566/000000000000/o4x-events-standard \
+go run cmd/consumer/main.go --workers 2
+
+# Health checks: http://localhost:8081/health, :8082/health, :8083/health
 ```
 
 ### Using Docker Compose
 
-Run all services together:
+Run all services together (includes 3 specialized consumer services):
 ```bash
 docker-compose up --build
 ```
+
+Services:
+- `api` - REST API server (:18000)
+- `dispatcher` - Outbox publisher (:18080)
+- `consumer-order` - Order event consumer (:18081)
+- `consumer-notification` - Notification event consumer (:18082)
+- `consumer-user` - User event consumer (:18083)
 
 ## Local Development (without Docker)
 
@@ -178,12 +241,21 @@ export SQS_QUEUE_URL="http://localhost:24566/000000000000/o4x-events.fifo"
 export STANDARD_QUEUE_URL="http://localhost:24566/000000000000/o4x-events-standard"
 go run cmd/dispatcher/main.go --multi-queue --workers 2
 
-# Terminal 3: Consumer
+# Terminal 3: Consumer (Order)
+cd examples/app
+export DATABASE_URL="postgres://postgres:postgres@localhost:25432/o4x?sslmode=disable"
+export SQS_ENDPOINT="http://localhost:24566"
+export SQS_QUEUE_URL="http://localhost:24566/000000000000/o4x-events.fifo"
+export CONSUMER_GROUP="order"
+go run cmd/consumer/main.go --workers 2
+
+# Terminal 4: Consumer (Notification)
 cd examples/app
 export DATABASE_URL="postgres://postgres:postgres@localhost:25432/o4x?sslmode=disable"
 export SQS_ENDPOINT="http://localhost:24566"
 export SQS_QUEUE_URL="http://localhost:24566/000000000000/o4x-events-standard"
-go run cmd/consumer/main.go --workers 2 --message-concurrency 10
+export CONSUMER_GROUP="notification"
+go run cmd/consumer/main.go --workers 5 --message-concurrency 10
 ```
 
 **Benefits of local development:**
@@ -422,12 +494,12 @@ GROUP BY topic, status
 ORDER BY topic, status;
 ```
 
-Watch consumer messages:
+Watch consumer inbox (idempotency tracking):
 ```sql
-SELECT topic, status, COUNT(*)
-FROM consumer_messages
-GROUP BY topic, status
-ORDER BY topic, status;
+SELECT consumer_name, status, COUNT(*)
+FROM consumer_inbox
+GROUP BY consumer_name, status
+ORDER BY consumer_name, status;
 ```
 
 Watch idempotency tables:
@@ -464,7 +536,8 @@ LIMIT 10;
 **Consumer**:
 - `DATABASE_URL` - PostgreSQL connection string
 - `SQS_ENDPOINT` - SQS endpoint URL
-- `SQS_QUEUE_URL` - Queue URL to consume from
+- `SQS_QUEUE_URL` - Queue URL to consume from (required)
+- `CONSUMER_GROUP` - Handler group: order, user, notification (required)
 - `AWS_REGION` - AWS region
 - `HEALTH_PORT` - Health check port (default: 8081)
 
@@ -491,7 +564,7 @@ LIMIT 10;
 - `--workers N` - Number of worker goroutines (default: 2)
 
 **Consumer**:
-- `--fifo` - Connect to FIFO queue (default: Standard)
+- `--group` - Consumer group (required): order, user, notification
 - `--simulate-failure` - Enable random failures for testing
 - `--failure-rate` - Failure rate 0.0-1.0 (default: 0.3)
 - `--workers N` - Number of worker goroutines (default: 2)
@@ -513,9 +586,10 @@ All services expose health check endpoints for container orchestration:
 - **Dispatcher**:
   - Liveness: `http://localhost:8080/health`
   - Readiness: `http://localhost:8080/ready`
-- **Consumer**:
-  - Liveness: `http://localhost:8081/health`
-  - Readiness: `http://localhost:8081/ready`
+- **Consumers**:
+  - Order: Liveness `http://localhost:18081/health`, Readiness `http://localhost:18081/ready`
+  - Notification: Liveness `http://localhost:18082/health`, Readiness `http://localhost:18082/ready`
+  - User: Liveness `http://localhost:18083/health`, Readiness `http://localhost:18083/ready`
 
 ## Key Learnings
 
@@ -536,16 +610,9 @@ Run revive at dispatcher startup:
 repo.ReviveStuckPublishing(ctx)
 ```
 
-### Messages stuck in CONSUMING
-
-Run revive at consumer startup:
-```go
-repo.ReviveStuckConsuming(ctx)
-```
-
 ### High failure rate
 
-Check error_message in outbox/consumer_messages:
+Check error_message in outbox:
 ```sql
 SELECT error_message, COUNT(*)
 FROM outbox

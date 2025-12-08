@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/hacomono-lib/o4x/contrib/pgx"
 	"github.com/hacomono-lib/o4x/contrib/sqs/consumer"
 	"github.com/hacomono-lib/o4x/examples/app/internal/domain"
 	"github.com/hacomono-lib/o4x/examples/app/internal/service"
@@ -82,13 +83,15 @@ func (h *OrderCreatedHandler) Handle(ctx context.Context, msg *consumer.SQSMessa
 // OrderConfirmedHandler handles order.confirmed events
 type OrderConfirmedHandler struct {
 	pool        *pgxpool.Pool
+	inbox       *pgx.InboxRepository
 	logger      *slog.Logger
 	sleepConfig SleepConfig
 }
 
-func NewOrderConfirmedHandler(pool *pgxpool.Pool, logger *slog.Logger, sleepConfig SleepConfig) *OrderConfirmedHandler {
+func NewOrderConfirmedHandler(pool *pgxpool.Pool, inbox *pgx.InboxRepository, logger *slog.Logger, sleepConfig SleepConfig) *OrderConfirmedHandler {
 	return &OrderConfirmedHandler{
 		pool:        pool,
+		inbox:       inbox,
 		logger:      logger,
 		sleepConfig: sleepConfig,
 	}
@@ -115,34 +118,40 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	// Simulate DB operation delay
 	h.sleepConfig.Sleep()
 
-	// Idempotent processing using message_id
-	// Check if this message has already been processed
+	// Idempotent processing using InboxRepository
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Insert order confirmation record (idempotent via message_id)
+	// Check idempotency using InboxRepository
+	inboxTx := h.inbox.WithTx(tx)
+	shouldProcess, err := inboxTx.TryStart(ctx, "OrderConfirmedHandler", msg.MessageID)
+	if err != nil {
+		return fmt.Errorf("failed to check inbox: %w", err)
+	}
+	if !shouldProcess {
+		h.logger.Info("order.confirmed event already processed (idempotent)",
+			"message_id", msg.MessageID,
+			"order_id", event.OrderID,
+		)
+		return nil
+	}
+
+	// Insert order confirmation record
 	query := `
 		INSERT INTO order_confirmations (message_id, order_id, user_id, product_id, quantity, processed_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
-		ON CONFLICT (message_id) DO NOTHING
-		RETURNING order_id
 	`
-
-	var returnedOrderID uuid.UUID
-	err = tx.QueryRow(ctx, query, msg.MessageID, event.OrderID, event.UserID, event.ProductID, event.Quantity).Scan(&returnedOrderID)
+	_, err = tx.Exec(ctx, query, msg.MessageID, event.OrderID, event.UserID, event.ProductID, event.Quantity)
 	if err != nil {
-		// If no rows returned, it means this message was already processed
-		if err.Error() == "no rows in result set" {
-			h.logger.Info("order.confirmed event already processed (idempotent)",
-				"message_id", msg.MessageID,
-				"order_id", event.OrderID,
-			)
-			return nil
-		}
 		return fmt.Errorf("failed to insert order confirmation: %w", err)
+	}
+
+	// Mark as completed in inbox
+	if err := inboxTx.Complete(ctx, "OrderConfirmedHandler", msg.MessageID); err != nil {
+		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
 	h.logger.Info("order.confirmed event processed successfully",

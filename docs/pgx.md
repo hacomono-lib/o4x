@@ -42,7 +42,10 @@ repo := pgx.NewOutboxRepository(pool)
 // Use custom table names
 repo := pgx.NewOutboxRepository(pool,
     pgx.WithOutboxTableName("my_outbox"),
-    pgx.WithConsumerMessagesTableName("my_consumer_messages"),
+)
+
+inboxRepo := pgx.NewInboxRepository(pool,
+    pgx.WithInboxTableName("my_inbox"),
 )
 ```
 
@@ -157,15 +160,49 @@ import "github.com/hacomono-lib/o4x/contrib/pgx"
 consumerRepo := pgx.NewConsumerRepository(pool)
 
 // Use with consumer service
-svc := consumer.NewService(sqsClient, consumerRepo, handler, config)
+svc := consumer.NewService(sqsClient, handler, config)
 ```
 
-### Custom Table Names
+### Using InboxRepository for Idempotency
 
 ```go
-consumerRepo := pgx.NewConsumerRepository(pool,
-    pgx.WithConsumerMessagesTableName("my_consumer_messages"),
+// InboxRepository provides database-level idempotency checking
+inboxRepo := pgx.NewInboxRepository(pool,
+    pgx.WithInboxTableName("my_inbox"),
 )
+
+// Use in handler
+type OrderHandler struct {
+    pool  *pgxpool.Pool
+    inbox core.InboxRepository
+}
+
+func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    tx, err := h.pool.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback(ctx)
+
+    // Check idempotency
+    inboxTx := h.inbox.WithTx(tx)
+    shouldProcess, err := inboxTx.TryStart(ctx, "OrderHandler", msg.MessageID)
+    if err != nil {
+        return err
+    }
+    if !shouldProcess {
+        return nil // Already processed
+    }
+
+    // Process message...
+
+    // Mark as completed
+    if err := inboxTx.Complete(ctx, "OrderHandler", msg.MessageID); err != nil {
+        return err
+    }
+
+    return tx.Commit(ctx)
+}
 ```
 
 ## Performance Optimization
@@ -199,9 +236,8 @@ CREATE INDEX idx_outbox_status_created ON outbox(status, created_at)
 
 CREATE INDEX idx_outbox_idempotency ON outbox(topic, idempotency_key);
 
--- Consumer messages table
-CREATE INDEX idx_consumer_status_received ON consumer_messages(status, received_at) 
-    WHERE status = 'CONSUMING';
+-- Consumer inbox table (optional, for idempotency checking)
+-- Primary key (consumer_name, message_id) is automatically indexed
 ```
 
 ## Best Practices
