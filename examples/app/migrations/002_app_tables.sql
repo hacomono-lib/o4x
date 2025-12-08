@@ -15,9 +15,10 @@ CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_status ON users(status);
 
 -- Orders table
+-- Note: user_id does not have FK constraint to allow benchmark testing with random UUIDs
 CREATE TABLE IF NOT EXISTS orders (
     id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(id),
+    user_id UUID NOT NULL,
     product_id VARCHAR(255) NOT NULL,
     quantity INTEGER NOT NULL,
     total_price INTEGER NOT NULL,
@@ -91,3 +92,15 @@ INSERT INTO inventory (product_id, quantity, reserved, updated_at) VALUES
     ('product-004', 10, 0, NOW()),
     ('product-005', 0, 0, NOW())
 ON CONFLICT (product_id) DO NOTHING;
+
+-- Seed benchmark users (100 users for performance testing)
+INSERT INTO users (id, email, name, status, created_at, updated_at)
+SELECT
+    gen_random_uuid(),
+    'bench-user-' || generate_series || '@example.com',
+    'Benchmark User ' || generate_series,
+    'active',
+    NOW(),
+    NOW()
+FROM generate_series(1, 100)
+ON CONFLICT (email) DO NOTHING;
