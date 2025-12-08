@@ -31,10 +31,11 @@ type outboxModel struct {
 
 // OutboxRepository implements core.OutboxRepository for GORM
 type OutboxRepository struct {
-	db          *gorm.DB
-	tableName   string
-	backoffBase time.Duration
-	backoffMax  time.Duration
+	db                       *gorm.DB
+	tableName                string
+	backoffBase              time.Duration
+	backoffMax               time.Duration
+	stuckPublishingThreshold time.Duration
 }
 
 // NewOutboxRepository creates a new GORM outbox repository
@@ -47,10 +48,11 @@ func NewOutboxRepository(db *gorm.DB, opts ...Option) *OutboxRepository {
 	}
 
 	return &OutboxRepository{
-		db:          db,
-		tableName:   cfg.OutboxTableName,
-		backoffBase: cfg.RequeueBackoffBase,
-		backoffMax:  cfg.RequeueBackoffMax,
+		db:                       db,
+		tableName:                cfg.OutboxTableName,
+		backoffBase:              cfg.RequeueBackoffBase,
+		backoffMax:               cfg.RequeueBackoffMax,
+		stuckPublishingThreshold: cfg.StuckPublishingThreshold,
 	}
 }
 
@@ -72,10 +74,11 @@ func NewOutboxRepository(db *gorm.DB, opts ...Option) *OutboxRepository {
 //	tx.Commit()
 func (r *OutboxRepository) WithTx(tx *gorm.DB) *OutboxRepository {
 	return &OutboxRepository{
-		db:          tx,
-		tableName:   r.tableName,
-		backoffBase: r.backoffBase,
-		backoffMax:  r.backoffMax,
+		db:                       tx,
+		tableName:                r.tableName,
+		backoffBase:              r.backoffBase,
+		backoffMax:               r.backoffMax,
+		stuckPublishingThreshold: r.stuckPublishingThreshold,
 	}
 }
 
@@ -312,7 +315,7 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, top
 // This prevents infinite retries for messages that consistently fail.
 // Messages exceeding max_retries will be moved to DEAD on next retry attempt.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
-	threshold := time.Now().Add(-5 * time.Minute)
+	threshold := time.Now().Add(-r.stuckPublishingThreshold)
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
 		Where("status = ? AND updated_at < ?", string(core.OutboxStatusPublishing), threshold).

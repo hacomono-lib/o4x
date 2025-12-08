@@ -332,7 +332,9 @@ messageLoop:
 			defer wg.Done()
 			defer func() { <-sem }() // Release semaphore
 
-			s.processMessage(ctx, msg, logger)
+			// Create message-specific logger for better observability in parallel processing
+			msgLogger := logger.With("message_id", aws.ToString(msg.MessageId))
+			s.processMessage(ctx, msg, msgLogger)
 		}(sqsMsg)
 	}
 

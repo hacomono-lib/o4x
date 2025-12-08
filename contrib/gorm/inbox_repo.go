@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/hacomono-lib/o4x/core"
@@ -51,14 +52,16 @@ type consumerInboxModel struct {
 //	// Process message...
 //	inboxRepo.Complete(ctx, "OrderHandler", msg.MessageID)
 type InboxRepository struct {
-	db        *gorm.DB
-	tableName string
+	db                  *gorm.DB
+	tableName           string
+	stuckInboxThreshold time.Duration
 }
 
 // NewInboxRepository creates a new GORM inbox repository.
 //
 // Options:
 //   - WithInboxTableName: Customize table name (default: "consumer_inbox")
+//   - WithStuckInboxThreshold: Set stuck message threshold (default: 2 minutes)
 //
 // Example:
 //
@@ -72,8 +75,9 @@ func NewInboxRepository(db *gorm.DB, opts ...Option) *InboxRepository {
 	}
 
 	return &InboxRepository{
-		db:        db,
-		tableName: cfg.InboxTableName,
+		db:                  db,
+		tableName:           cfg.InboxTableName,
+		stuckInboxThreshold: cfg.StuckInboxThreshold,
 	}
 }
 
@@ -100,34 +104,29 @@ func NewInboxRepository(db *gorm.DB, opts ...Option) *InboxRepository {
 //	tx.Commit()
 func (r *InboxRepository) WithTx(tx *gorm.DB) *InboxRepository {
 	return &InboxRepository{
-		db:        tx,
-		tableName: r.tableName,
+		db:                  tx,
+		tableName:           r.tableName,
+		stuckInboxThreshold: r.stuckInboxThreshold,
 	}
 }
 
 // TryStart attempts to mark a message as "PROCESSING" in the inbox.
 //
-// Implementation (ATOMIC):
-//   - Uses INSERT ... ON CONFLICT DO NOTHING for atomic duplicate detection
-//   - If INSERT succeeds (1 row) -> first time processing -> returns (true, nil)
-//   - If INSERT conflicts (0 rows) -> duplicate exists -> check status
-//   - If status=COMPLETED -> already processed -> returns (false, nil)
-//   - If status=PROCESSING -> retry scenario -> returns (true, nil)
+// Implementation Strategy:
+//  1. Try INSERT first with ON CONFLICT DO NOTHING (optimistic path for new messages)
+//  2. If INSERT conflicts, check existing record status
 //
-// This correctly handles retry scenarios:
-//  1. Initial call: INSERT success (1 row) -> true
-//  2. Handler fails (e.g., external API) -> error returned, status=PROCESSING
-//  3. SQS retry: INSERT conflict (0 rows) -> check status=PROCESSING -> true (process again)
-//  4. Handler succeeds -> Complete() called -> status=COMPLETED
-//  5. Next duplicate: INSERT conflict (0 rows) -> check status=COMPLETED -> false (skip)
+// Behavior:
+//   - First message: INSERT succeeds -> returns (true, nil)
+//   - Duplicate (COMPLETED): Returns (false, nil) - skip processing
+//   - Duplicate (PROCESSING): Returns (true, nil) - allow retry
 //
 // Returns:
-//   - (true, nil): Should proceed with processing (first time OR retry)
-//   - (false, nil): Already COMPLETED, safe to skip
+//   - (true, nil): Should proceed with processing
+//   - (false, nil): Already completed (duplicate message)
 //   - (false, error): Database error occurred
 func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID string) (bool, error) {
-	// Try atomic INSERT with ON CONFLICT DO NOTHING using raw SQL
-	// GORM doesn't support ON CONFLICT directly, so we use Raw
+	// Optimistic path: Try INSERT first (most messages are new)
 	insertQuery := fmt.Sprintf(`
 		INSERT INTO %s (consumer_name, message_id, status, received_at)
 		VALUES (?, ?, 'PROCESSING', NOW())
@@ -144,24 +143,66 @@ func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID 
 		return true, nil
 	}
 
-	// INSERT conflicted (0 rows affected) - record already exists, check its status
-	var existing consumerInboxModel
-	err := r.db.WithContext(ctx).
-		Table(r.tableName).
-		Where("consumer_name = ? AND message_id = ?", consumerName, messageID).
-		First(&existing).Error
+	// INSERT conflicted (0 rows affected) - record already exists
+	// Check its status with exclusive lock to prevent concurrent processing
+	// Defense in depth: SQS visibility timeout is primary control, this is secondary
+	lockQuery := fmt.Sprintf(`
+		SELECT consumer_name, message_id, status, received_at, processed_at
+		FROM %s
+		WHERE consumer_name = ? AND message_id = ?
+		FOR UPDATE NOWAIT
+	`, r.tableName)
 
-	if err != nil {
-		return false, fmt.Errorf("failed to check existing inbox record after conflict: %w", err)
+	var existing consumerInboxModel
+	err := r.db.WithContext(ctx).Raw(lockQuery, consumerName, messageID).Scan(&existing).Error
+
+	// Lock acquired successfully
+	if err == nil {
+		// Check status
+		if existing.Status == string(core.InboxStatusCompleted) {
+			// Already completed - duplicate message
+			return false, nil
+		}
+
+		// PROCESSING state - check if stuck (crashed handler)
+		if existing.Status == string(core.InboxStatusProcessing) {
+			age := time.Since(existing.ReceivedAt)
+			if age > r.stuckInboxThreshold {
+				// Stuck message (handler likely crashed) - allow retry
+				// The lock ensures only one worker will retry at a time
+				return true, nil
+			}
+			// Recent PROCESSING - another worker is processing
+			// Reject to be safe (shouldn't happen with correct visibility timeout)
+			return false, nil
+		}
+
+		// Unknown status - allow processing
+		return true, nil
 	}
 
-	// Check status
-	if existing.Status == string(core.InboxStatusCompleted) {
-		// Already completed - duplicate message
+	// Check for lock timeout error (concurrent processing)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+		// Another worker is currently processing this message
+		// Return false to skip (the other worker will handle it)
 		return false, nil
 	}
-	// Still processing - retry scenario (handler failed previously)
-	return true, nil
+
+	// Check for context cancellation or deadline
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false, nil
+	}
+
+	// Check for record not found (shouldn't happen, but handle gracefully)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Race condition: record was deleted between INSERT and SELECT
+		// This is very rare but possible. Return false to skip.
+		return false, nil
+	}
+
+	// Unexpected error
+	return false, fmt.Errorf("failed to lock inbox record: %w", err)
 }
 
 // Complete marks a message as "COMPLETED" in the inbox.

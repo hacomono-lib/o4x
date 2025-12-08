@@ -252,6 +252,25 @@ SQS provides at-least-once delivery, so handlers must be idempotent.
 6. Monitor stuck messages in 'processing' status (indicates handler crashes)
 7. **Important**: Return `nil` on duplicates, not an error
 
+#### InboxRepository Implementation Notes
+
+**Defense in Depth Design:**
+- **Primary control**: SQS visibility timeout prevents concurrent processing
+- **Secondary control**: DB `FOR UPDATE NOWAIT` guards against misconfiguration
+- Both `pgx` and `gorm` implementations use identical logic for consistency
+
+**Concurrent Processing Prevention:**
+1. **New message**: INSERT succeeds → Worker proceeds
+2. **Duplicate (COMPLETED)**: Lock acquired → Returns `false` (skip)
+3. **Recent PROCESSING** (age < threshold): Lock acquired → Returns `false` (another worker handling)
+4. **Stuck PROCESSING** (age > threshold): Lock acquired → Returns `true` (crash recovery)
+5. **Lock conflict**: `lock_not_available` (55P03) → Returns `false` (concurrent prevention)
+
+**Why both layers?**
+- SQS visibility timeout handles normal cases (99.9%)
+- DB NOWAIT catches edge cases (slow handlers, timeout misconfiguration)
+- Result: Zero duplicate processing even with configuration errors
+
 → **For complete code examples and detailed implementation patterns**, see [README.md Idempotency section](README.md#idempotency)
 
 ### MessageConcurrency

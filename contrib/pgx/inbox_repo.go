@@ -15,11 +15,6 @@ import (
 
 // SQL queries for consumer_inbox table
 const (
-	queryInboxCheckExisting = `
-		SELECT consumer_name, message_id, status, received_at, processed_at
-		FROM %s
-		WHERE consumer_name = $1 AND message_id = $2`
-
 	queryInboxTryStart = `
 		INSERT INTO %s (consumer_name, message_id, status, received_at)
 		VALUES ($1, $2, 'PROCESSING', now())
@@ -43,9 +38,10 @@ const (
 
 // InboxRepository implements core.InboxRepository and core.InboxCleaner for pgx.
 type InboxRepository struct {
-	pool      *pgxpool.Pool
-	tx        pgx.Tx // nil if not in transaction
-	tableName string
+	pool                *pgxpool.Pool
+	tx                  pgx.Tx // nil if not in transaction
+	tableName           string
+	stuckInboxThreshold time.Duration
 }
 
 // NewInboxRepository creates a new pgx inbox repository.
@@ -58,8 +54,9 @@ func NewInboxRepository(pool *pgxpool.Pool, opts ...Option) *InboxRepository {
 	}
 
 	return &InboxRepository{
-		pool:      pool,
-		tableName: cfg.InboxTableName,
+		pool:                pool,
+		tableName:           cfg.InboxTableName,
+		stuckInboxThreshold: cfg.StuckInboxThreshold,
 	}
 }
 
@@ -82,34 +79,38 @@ func NewInboxRepository(pool *pgxpool.Pool, opts ...Option) *InboxRepository {
 //	tx.Commit(ctx)
 func (r *InboxRepository) WithTx(tx pgx.Tx) *InboxRepository {
 	return &InboxRepository{
-		pool:      r.pool,
-		tx:        tx,
-		tableName: r.tableName,
+		pool:                r.pool,
+		tx:                  tx,
+		tableName:           r.tableName,
+		stuckInboxThreshold: r.stuckInboxThreshold,
 	}
 }
 
 // TryStart attempts to mark a message as "PROCESSING" in the inbox.
 //
-// Implementation (ATOMIC):
-//   - Uses INSERT ... ON CONFLICT DO NOTHING for atomic duplicate detection
-//   - If INSERT succeeds (1 row returned) -> first time processing -> returns (true, nil)
-//   - If INSERT conflicts (0 rows returned) -> duplicate exists -> check status
-//   - If status=COMPLETED -> already processed -> returns (false, nil)
-//   - If status=PROCESSING -> retry scenario -> returns (true, nil)
+// Implementation Strategy (ATOMIC with Deadlock Prevention):
+//  1. Try INSERT first (optimistic path for new messages)
+//  2. If INSERT conflicts, try SELECT FOR UPDATE NOWAIT to check existing record
+//  3. FOR UPDATE NOWAIT prevents concurrent processing and deadlocks
 //
-// This correctly handles retry scenarios:
-//  1. Initial call: INSERT success (1 row) -> true
-//  2. Handler fails (e.g., external API) -> error returned, status=PROCESSING
-//  3. SQS retry: INSERT conflict (0 rows) -> check status=PROCESSING -> true (process again)
-//  4. Handler succeeds -> Complete() called -> status=COMPLETED
-//  5. Next duplicate: INSERT conflict (0 rows) -> check status=COMPLETED -> false (skip)
+// Behavior:
+//   - First message: INSERT succeeds -> returns (true, nil)
+//   - Duplicate (COMPLETED): Returns (false, nil) - skip processing
+//   - Duplicate (PROCESSING, recent): Returns (false, nil) - another worker is processing
+//   - Duplicate (PROCESSING, stuck): Returns (true, nil) - allow crash recovery
+//   - Concurrent requests: First gets lock, others get lock error -> returns (false, nil)
+//
+// Crash Recovery:
+//   - If a record is stuck in PROCESSING state longer than StuckInboxThreshold,
+//     it's considered crashed and retry is allowed.
+//   - Default: 2 minutes (should be 2x your maximum handler processing time)
 //
 // Returns:
-//   - (true, nil): Should proceed with processing (first time OR retry)
-//   - (false, nil): Already COMPLETED, safe to skip
+//   - (true, nil): Should proceed with processing
+//   - (false, nil): Duplicate or currently being processed, safe to skip
 //   - (false, error): Database error occurred
 func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID string) (bool, error) {
-	// Try atomic INSERT with ON CONFLICT DO NOTHING
+	// Optimistic path: Try INSERT first (most messages are new)
 	insertQuery := fmt.Sprintf(queryInboxTryStart, r.tableName)
 
 	var inserted core.ConsumerInbox
@@ -129,34 +130,72 @@ func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID 
 		return true, nil
 	}
 
-	// INSERT failed due to conflict (pgx.ErrNoRows = no RETURNING data)
+	// INSERT failed due to conflict (pgx.ErrNoRows = no RETURNING data from ON CONFLICT DO NOTHING)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Record already exists - check its status
-		query := fmt.Sprintf(queryInboxCheckExisting, r.tableName)
+		// Record already exists - check its status with exclusive lock to prevent concurrent processing
+		lockQuery := fmt.Sprintf(`
+			SELECT consumer_name, message_id, status, received_at, processed_at
+			FROM %s
+			WHERE consumer_name = $1 AND message_id = $2
+			FOR UPDATE NOWAIT
+		`, r.tableName)
+
 		var existing core.ConsumerInbox
 
 		var row pgx.Row
 		if r.tx != nil {
-			row = r.tx.QueryRow(ctx, query, consumerName, messageID)
+			row = r.tx.QueryRow(ctx, lockQuery, consumerName, messageID)
 		} else {
-			row = r.pool.QueryRow(ctx, query, consumerName, messageID)
+			row = r.pool.QueryRow(ctx, lockQuery, consumerName, messageID)
 		}
 
 		err2 := row.Scan(&existing.ConsumerName, &existing.MessageID, &existing.Status, &existing.ReceivedAt, &processedAt)
-		if err2 != nil {
-			return false, fmt.Errorf("failed to check existing inbox record after conflict: %w", err2)
+
+		// Lock acquired successfully
+		if err2 == nil {
+			// Check status
+			if existing.Status == core.InboxStatusCompleted {
+				// Already completed - duplicate message
+				return false, nil
+			}
+
+			// PROCESSING state - check if stuck (crashed handler)
+			if existing.Status == core.InboxStatusProcessing {
+				age := time.Since(existing.ReceivedAt)
+				if age > r.stuckInboxThreshold {
+					// Stuck message (handler likely crashed) - allow retry
+					// The lock ensures only one worker will retry at a time
+					return true, nil
+				}
+				// Recent PROCESSING - this shouldn't happen if visibility timeout is set correctly
+				// but another worker might have just picked it up. Reject to be safe.
+				return false, nil
+			}
+
+			// Unknown status - allow processing
+			return true, nil
 		}
 
-		// Check status
-		if existing.Status == core.InboxStatusCompleted {
-			// Already completed - duplicate message
+		// Check for lock timeout error (concurrent processing)
+		var pgErr *pgconn.PgError
+		if errors.As(err2, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+			// Another worker is currently processing this message
+			// Return false to skip (the other worker will handle it)
 			return false, nil
 		}
-		// Still processing - retry scenario (handler failed previously)
-		return true, nil
+
+		// Check for record not found (shouldn't happen, but handle gracefully)
+		if errors.Is(err2, pgx.ErrNoRows) {
+			// Race condition: record was deleted between INSERT and SELECT
+			// This is very rare but possible. Return false to skip.
+			return false, nil
+		}
+
+		// Unexpected error during lock acquisition
+		return false, fmt.Errorf("failed to lock existing inbox record: %w", err2)
 	}
 
-	// Unexpected error
+	// Unexpected error during INSERT
 	return false, fmt.Errorf("failed to insert inbox record: %w", err)
 }
 

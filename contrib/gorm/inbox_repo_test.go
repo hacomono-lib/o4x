@@ -83,29 +83,33 @@ func (s *InboxRepositorySuite) TestTryStart_FirstTime_ReturnsTrue() {
 }
 
 func (s *InboxRepositorySuite) TestTryStart_ProcessingState_ReturnsTrue() {
-	// This tests the retry scenario: handler failed, message still processing
+	// This tests crash recovery: stuck message in PROCESSING state
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
 	messageID := "msg-retry-123"
 
+	// Create repository with very short stuck threshold for testing
+	repoWithShortThreshold := NewInboxRepository(s.db, WithInboxTableName(s.tableName), WithStuckInboxThreshold(1*time.Millisecond))
+
 	// First call - creates processing record
-	ok1, err1 := s.repo.TryStart(ctx, consumerName, messageID)
+	ok1, err1 := repoWithShortThreshold.TryStart(ctx, consumerName, messageID)
 	s.Require().NoError(err1)
 	s.Require().True(ok1)
 
-	// Simulate handler failure (Complete() NOT called)
-	// Record remains in "processing" state
+	// Simulate handler crash: Complete() NOT called, record remains PROCESSING
+	// Wait for stuck threshold to pass
+	time.Sleep(10 * time.Millisecond)
 
-	// Act: Second call with same message_id (retry scenario)
-	ok2, err2 := s.repo.TryStart(ctx, consumerName, messageID)
+	// Act: Second call with same message_id (crash recovery scenario)
+	ok2, err2 := repoWithShortThreshold.TryStart(ctx, consumerName, messageID)
 
-	// Assert: Should return true to allow retry
+	// Assert: Should return true for stuck message (crash recovery)
 	assert.NoError(s.T(), err2)
-	assert.True(s.T(), ok2, "TryStart with processing record should return true (retry)")
+	assert.True(s.T(), ok2, "TryStart with stuck PROCESSING record should return true (crash recovery)")
 
 	// Verify record is still processing
-	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	inbox, err := repoWithShortThreshold.GetByMessageID(ctx, consumerName, messageID)
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), core.InboxStatusProcessing, inbox.Status)
 }
@@ -132,6 +136,32 @@ func (s *InboxRepositorySuite) TestTryStart_CompletedState_ReturnsFalse() {
 	// Assert: Should return false (already completed)
 	assert.NoError(s.T(), err2)
 	assert.False(s.T(), ok2, "TryStart with completed record should return false")
+}
+
+func (s *InboxRepositorySuite) TestTryStart_RecentProcessingState_ReturnsFalse() {
+	// This tests concurrent processing prevention with FOR UPDATE NOWAIT
+	// Arrange
+	ctx := context.Background()
+	consumerName := "OrderHandler"
+	messageID := "msg-concurrent-123"
+
+	// First call - creates processing record
+	ok1, err1 := s.repo.TryStart(ctx, consumerName, messageID)
+	s.Require().NoError(err1)
+	s.Require().True(ok1)
+
+	// Act: Immediate second call (simulates another worker trying to process same message)
+	// With FOR UPDATE NOWAIT, this should return false (lock not available)
+	ok2, err2 := s.repo.TryStart(ctx, consumerName, messageID)
+
+	// Assert: Should return false (recent PROCESSING, another worker is handling it)
+	assert.NoError(s.T(), err2)
+	assert.False(s.T(), ok2, "TryStart with recent PROCESSING record should return false (concurrent prevention)")
+
+	// Verify record is still processing
+	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	assert.NoError(s.T(), err)
+	assert.Equal(s.T(), core.InboxStatusProcessing, inbox.Status)
 }
 
 func (s *InboxRepositorySuite) TestTryStart_DifferentConsumerName_ReturnsTrue() {
@@ -185,8 +215,8 @@ func (s *InboxRepositorySuite) TestTryStart_Concurrent_AllReturnTrueForProcessin
 		}
 	}
 
-	// Assert: All goroutines should return true (PROCESSING allows retry)
-	assert.Equal(s.T(), 10, successCount, "All concurrent TryStart should return true for PROCESSING status")
+	// Assert: Only one goroutine should succeed (FOR UPDATE NOWAIT prevents concurrent processing)
+	assert.Equal(s.T(), 1, successCount, "Only one concurrent TryStart should succeed with FOR UPDATE NOWAIT")
 
 	// Verify only one record was created
 	var count int64

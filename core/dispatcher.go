@@ -159,21 +159,21 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	d.mu.Unlock()
 
 	// Auto-recover stuck messages if enabled and repository supports it
-	// Run asynchronously to prevent blocking dispatcher startup
+	// Run asynchronously to avoid delaying startup (especially when many stuck messages exist)
 	if d.config.AutoRecover {
-		if recovery, ok := d.repo.(OutboxRecovery); ok {
-			go func() {
+		go func() {
+			if recovery, ok := d.repo.(OutboxRecovery); ok {
 				count, err := recovery.ReviveStuckPublishing(ctx)
 				if err != nil {
 					d.config.Logger.ErrorContext(ctx, "failed to recover stuck messages at startup", "error", err)
 				} else if count > 0 {
 					d.config.Logger.InfoContext(ctx, "recovered stuck messages at startup", "count", count)
 				}
-			}()
-		} else {
-			d.config.Logger.WarnContext(ctx, "AutoRecover is enabled but repository does not implement OutboxRecovery. "+
-				"Consider calling ReviveStuckPublishing manually at startup to prevent message loss.")
-		}
+			} else {
+				d.config.Logger.WarnContext(ctx, "AutoRecover is enabled but repository does not implement OutboxRecovery. "+
+					"Consider calling ReviveStuckPublishing manually at startup to prevent message loss.")
+			}
+		}()
 	}
 
 	// Warn if RequeueInterval is 0 (FAILED messages will never retry automatically)

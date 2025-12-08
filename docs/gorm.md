@@ -37,18 +37,27 @@ if err != nil {
 repo := gormrepo.NewOutboxRepository(db)
 ```
 
-### Custom Table Names
+### Configuration Options
 
 ```go
-// Use custom table names
+// Outbox repository with custom options
 repo := gormrepo.NewOutboxRepository(db,
     gormrepo.WithOutboxTableName("my_outbox"),
+    gormrepo.WithStuckPublishingThreshold(10*time.Minute), // Default: 5 minutes
 )
 
+// Inbox repository with custom options
 inboxRepo := gormrepo.NewInboxRepository(db,
     gormrepo.WithInboxTableName("my_inbox"),
+    gormrepo.WithStuckInboxThreshold(30*time.Minute), // Default: 5 minutes
 )
 ```
+
+**Available Options:**
+- `WithOutboxTableName(name)` - Custom outbox table name (default: `"outbox"`)
+- `WithInboxTableName(name)` - Custom inbox table name (default: `"consumer_inbox"`)
+- `WithStuckPublishingThreshold(duration)` - Threshold for detecting stuck messages in PUBLISHING state (default: `5*time.Minute`)
+- `WithStuckInboxThreshold(duration)` - Threshold for detecting stuck messages in PROCESSING state (default: `5*time.Minute`)
 
 ## Transactional Outbox Pattern
 

@@ -36,18 +36,27 @@ defer pool.Close()
 repo := pgx.NewOutboxRepository(pool)
 ```
 
-### Custom Table Names
+### Configuration Options
 
 ```go
-// Use custom table names
+// Outbox repository with custom options
 repo := pgx.NewOutboxRepository(pool,
     pgx.WithOutboxTableName("my_outbox"),
+    pgx.WithStuckPublishingThreshold(10*time.Minute), // Default: 5 minutes
 )
 
+// Inbox repository with custom options
 inboxRepo := pgx.NewInboxRepository(pool,
     pgx.WithInboxTableName("my_inbox"),
+    pgx.WithStuckInboxThreshold(30*time.Minute), // Default: 5 minutes
 )
 ```
+
+**Available Options:**
+- `WithOutboxTableName(name)` - Custom outbox table name (default: `"outbox"`)
+- `WithInboxTableName(name)` - Custom inbox table name (default: `"consumer_inbox"`)
+- `WithStuckPublishingThreshold(duration)` - Threshold for detecting stuck messages in PUBLISHING state (default: `5*time.Minute`)
+- `WithStuckInboxThreshold(duration)` - Threshold for detecting stuck messages in PROCESSING state (default: `5*time.Minute`)
 
 ## Transactional Outbox Pattern
 

@@ -204,21 +204,21 @@ func (d *BatchDispatcher) Start(ctx context.Context) error {
 	d.mu.Unlock()
 
 	// Auto-recover stuck messages if enabled and repository supports it
-	// Run asynchronously to prevent blocking dispatcher startup
+	// Run asynchronously to avoid delaying startup (especially when many stuck messages exist)
 	if d.config.AutoRecover {
-		if recovery, ok := d.repo.(OutboxRecovery); ok {
-			go func() {
+		go func() {
+			if recovery, ok := d.repo.(OutboxRecovery); ok {
 				count, err := recovery.ReviveStuckPublishing(ctx)
 				if err != nil {
 					d.config.Logger.ErrorContext(ctx, "failed to recover stuck messages at startup", "error", err)
 				} else if count > 0 {
 					d.config.Logger.InfoContext(ctx, "recovered stuck messages at startup", "count", count)
 				}
-			}()
-		} else {
-			d.config.Logger.WarnContext(ctx, "AutoRecover is enabled but repository does not implement OutboxRecovery. "+
-				"Consider calling ReviveStuckPublishing manually at startup to prevent message loss.")
-		}
+			} else {
+				d.config.Logger.WarnContext(ctx, "AutoRecover is enabled but repository does not implement OutboxRecovery. "+
+					"Consider calling ReviveStuckPublishing manually at startup to prevent message loss.")
+			}
+		}()
 	}
 
 	// Warn if RequeueInterval is 0 (FAILED messages will never retry automatically)
@@ -315,6 +315,13 @@ func (d *BatchDispatcher) runBatchWorker(ctx context.Context, workerID int) {
 				// No messages - exponential backoff
 				currentInterval = min(currentInterval*2, d.config.MaxPollInterval)
 			}
+			// Properly reset timer: stop it first, drain channel if needed, then reset
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			timer.Reset(currentInterval)
 		}
 	}
@@ -372,7 +379,9 @@ func (d *BatchDispatcher) processBatch(ctx context.Context, logger *slog.Logger)
 		updatedCount, err := d.repo.UpdateBatchToPublished(cleanupCtx, successIDs)
 		if err != nil {
 			logger.ErrorContext(cleanupCtx, "failed to update batch to PUBLISHED", "error", err, "count", len(successIDs))
-			// Note: Messages will be recovered as FAILED on next startup via ReviveStuckPublishing
+			// CRITICAL: Messages remain in PUBLISHING state and were already published to SQS.
+			// ReviveStuckPublishing will mark them as FAILED, causing duplicate delivery.
+			// Monitor this error carefully - it indicates database or network issues.
 		} else if updatedCount < int64(len(successIDs)) {
 			// Partial success - some messages were not in PUBLISHING state
 			logger.WarnContext(cleanupCtx, "partial success updating batch to PUBLISHED",

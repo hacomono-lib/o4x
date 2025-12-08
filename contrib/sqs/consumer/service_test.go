@@ -1,15 +1,470 @@
 package consumer_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+
+	"github.com/hacomono-lib/o4x/contrib/sqs/consumer"
 )
 
-// TODO: Restore full test suite after removing consumer.Repository
-// The original test suite used MockConsumerRepository which no longer exists.
-// Tests need to be rewritten to test the simplified service without repository tracking.
+// mockSQSClient is a mock implementation of SQSClient for testing
+type mockSQSClient struct {
+	messages         []sqstypes.Message
+	receiveCallCount atomic.Int32
+	deleteCallCount  atomic.Int32
+	receiveDelay     time.Duration
+	receiveError     error
+	deleteError      error
+	mu               sync.Mutex
+}
 
-func TestServiceCompiles(t *testing.T) {
-	// Placeholder test to ensure package compiles
-	// Full test suite will be restored in a separate PR
-	t.Skip("Full test suite pending restoration")
+func (m *mockSQSClient) ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	m.receiveCallCount.Add(1)
+
+	if m.receiveDelay > 0 {
+		select {
+		case <-time.After(m.receiveDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	if m.receiveError != nil {
+		return nil, m.receiveError
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.messages) == 0 {
+		return &sqs.ReceiveMessageOutput{Messages: []sqstypes.Message{}}, nil
+	}
+
+	// Return up to MaxNumberOfMessages
+	batchSize := int(params.MaxNumberOfMessages)
+	if batchSize > len(m.messages) {
+		batchSize = len(m.messages)
+	}
+	if batchSize == 0 {
+		batchSize = 1 // Default to 1 if not specified
+	}
+
+	messages := make([]sqstypes.Message, batchSize)
+	copy(messages, m.messages[:batchSize])
+	m.messages = m.messages[batchSize:]
+
+	return &sqs.ReceiveMessageOutput{
+		Messages: messages,
+	}, nil
+}
+
+func (m *mockSQSClient) DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
+	m.deleteCallCount.Add(1)
+	if m.deleteError != nil {
+		return nil, m.deleteError
+	}
+	return &sqs.DeleteMessageOutput{}, nil
+}
+
+func (m *mockSQSClient) addMessage(messageID, body string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages = append(m.messages, sqstypes.Message{
+		MessageId:     aws.String(messageID),
+		Body:          aws.String(body),
+		ReceiptHandle: aws.String(fmt.Sprintf("receipt-%s", messageID)),
+	})
+}
+
+// mockHandler is a mock implementation of Handler for testing
+type mockHandler struct {
+	handleFunc    func(context.Context, *consumer.SQSMessage) error
+	callCount     atomic.Int32
+	processedMsgs sync.Map // messageID -> count
+}
+
+func (h *mockHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+	h.callCount.Add(1)
+	if h.handleFunc != nil {
+		return h.handleFunc(ctx, msg)
+	}
+	// Track processed messages
+	count, _ := h.processedMsgs.LoadOrStore(msg.MessageID, &atomic.Int32{})
+	count.(*atomic.Int32).Add(1)
+	return nil
+}
+
+func (h *mockHandler) getCallCount() int32 {
+	return h.callCount.Load()
+}
+
+// TestNewService_FIFOValidation tests that FIFO queues reject MessageConcurrency > 1
+func TestNewService_FIFOValidation(t *testing.T) {
+	tests := []struct {
+		name               string
+		queueURL           string
+		messageConcurrency int
+		expectError        bool
+	}{
+		{
+			name:               "FIFO queue with MessageConcurrency=1 (valid)",
+			queueURL:           "https://sqs.us-east-1.amazonaws.com/123456789012/test.fifo",
+			messageConcurrency: 1,
+			expectError:        false,
+		},
+		{
+			name:               "FIFO queue with MessageConcurrency>1 (invalid)",
+			queueURL:           "https://sqs.us-east-1.amazonaws.com/123456789012/test.fifo",
+			messageConcurrency: 10,
+			expectError:        true,
+		},
+		{
+			name:               "Standard queue with MessageConcurrency>1 (valid)",
+			queueURL:           "https://sqs.us-east-1.amazonaws.com/123456789012/test",
+			messageConcurrency: 10,
+			expectError:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := &mockSQSClient{}
+			mockHandler := &mockHandler{}
+
+			cfg := consumer.DefaultServiceConfig(tt.queueURL)
+			cfg.MessageConcurrency = tt.messageConcurrency
+
+			service := consumer.NewService(mockClient, mockHandler, cfg)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- service.Start(ctx)
+			}()
+
+			// Give it time to validate
+			time.Sleep(50 * time.Millisecond)
+
+			select {
+			case err := <-errCh:
+				if tt.expectError && err == nil {
+					t.Errorf("expected error for FIFO + MessageConcurrency>1, got nil")
+				}
+				if !tt.expectError && err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			default:
+				// Service started successfully
+				if tt.expectError {
+					t.Error("expected error but service started")
+				}
+				service.Stop()
+			}
+		})
+	}
+}
+
+// TestService_MessageProcessing tests basic message processing flow
+func TestService_MessageProcessing(t *testing.T) {
+	mockClient := &mockSQSClient{}
+	mockHandler := &mockHandler{}
+
+	// Add test messages
+	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{"data":"value"}}`)
+	mockClient.addMessage("msg-2", `{"topic":"test.event","payload":{"data":"value2"}}`)
+
+	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
+	cfg.WorkerCount = 1
+	cfg.MessageConcurrency = 1
+
+	service := consumer.NewService(mockClient, mockHandler, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = service.Start(ctx)
+	}()
+
+	// Wait for messages to be processed
+	time.Sleep(500 * time.Millisecond)
+
+	service.Stop()
+
+	// Verify both messages were processed
+	if count := mockHandler.getCallCount(); count != 2 {
+		t.Errorf("expected 2 messages processed, got %d", count)
+	}
+
+	// Verify both messages were deleted from SQS
+	if count := mockClient.deleteCallCount.Load(); count != 2 {
+		t.Errorf("expected 2 delete calls, got %d", count)
+	}
+}
+
+// TestService_ErrorHandling tests that handler errors don't stop the service
+func TestService_ErrorHandling(t *testing.T) {
+	mockClient := &mockSQSClient{}
+
+	var callCount atomic.Int32
+	mockHandler := &mockHandler{
+		handleFunc: func(ctx context.Context, msg *consumer.SQSMessage) error {
+			count := callCount.Add(1)
+			if count == 1 {
+				return errors.New("simulated error")
+			}
+			return nil
+		},
+	}
+
+	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{}}`)
+	mockClient.addMessage("msg-2", `{"topic":"test.event","payload":{}}`)
+
+	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
+	cfg.WorkerCount = 1
+
+	service := consumer.NewService(mockClient, mockHandler, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = service.Start(ctx)
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	service.Stop()
+
+	// First message fails (not deleted), second succeeds (deleted)
+	if count := mockClient.deleteCallCount.Load(); count != 1 {
+		t.Errorf("expected 1 delete call (only successful message), got %d", count)
+	}
+
+	if count := callCount.Load(); count != 2 {
+		t.Errorf("expected 2 handler calls, got %d", count)
+	}
+}
+
+// TestService_MessageConcurrency tests parallel message processing
+func TestService_MessageConcurrency(t *testing.T) {
+	mockClient := &mockSQSClient{}
+
+	var processingCount atomic.Int32
+	var maxConcurrent atomic.Int32
+
+	mockHandler := &mockHandler{
+		handleFunc: func(ctx context.Context, msg *consumer.SQSMessage) error {
+			current := processingCount.Add(1)
+			defer processingCount.Add(-1)
+
+			// Track max concurrent
+			for {
+				max := maxConcurrent.Load()
+				if current <= max || maxConcurrent.CompareAndSwap(max, current) {
+					break
+				}
+			}
+
+			// Simulate processing time
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		},
+	}
+
+	// Add multiple messages
+	for i := 0; i < 10; i++ {
+		mockClient.addMessage(fmt.Sprintf("msg-%d", i), `{"topic":"test.event","payload":{}}`)
+	}
+
+	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
+	cfg.WorkerCount = 1
+	cfg.MessageConcurrency = 5 // Process 5 messages concurrently
+
+	service := consumer.NewService(mockClient, mockHandler, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = service.Start(ctx)
+	}()
+
+	time.Sleep(2 * time.Second)
+	service.Stop()
+
+	// Verify that we achieved some level of concurrency
+	maxConcurrentValue := maxConcurrent.Load()
+	if maxConcurrentValue < 2 {
+		t.Errorf("expected concurrent processing (maxConcurrentValue >= 2), got maxConcurrentValue=%d", maxConcurrentValue)
+	}
+
+	t.Logf("Max concurrent processing: %d", maxConcurrentValue)
+}
+
+// TestService_GracefulShutdown tests that shutdown waits for in-flight messages
+func TestService_GracefulShutdown(t *testing.T) {
+	mockClient := &mockSQSClient{}
+
+	var processingStarted atomic.Bool
+	var processingCompleted atomic.Bool
+
+	mockHandler := &mockHandler{
+		handleFunc: func(ctx context.Context, msg *consumer.SQSMessage) error {
+			processingStarted.Store(true)
+			time.Sleep(500 * time.Millisecond)
+			processingCompleted.Store(true)
+			return nil
+		},
+	}
+
+	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{}}`)
+
+	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
+	cfg.ShutdownTimeout = 2 * time.Second
+
+	service := consumer.NewService(mockClient, mockHandler, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		_ = service.Start(ctx)
+	}()
+
+	// Wait for processing to start
+	for !processingStarted.Load() {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Trigger shutdown while message is processing
+	cancel()
+	service.Stop()
+
+	// Verify processing completed
+	if !processingCompleted.Load() {
+		t.Error("expected message processing to complete during graceful shutdown")
+	}
+
+	// Verify message was deleted
+	if count := mockClient.deleteCallCount.Load(); count != 1 {
+		t.Errorf("expected message to be deleted after completion, got %d deletes", count)
+	}
+}
+
+// TestService_HealthStatus tests health check functionality
+func TestService_HealthStatus(t *testing.T) {
+	mockClient := &mockSQSClient{}
+	mockHandler := &mockHandler{}
+
+	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
+	service := consumer.NewService(mockClient, mockHandler, cfg)
+
+	// Before start
+	status := service.HealthStatus()
+	if status.IsHealthy() {
+		t.Error("service should not be healthy before start")
+	}
+
+	// After start
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = service.Start(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	status = service.HealthStatus()
+	if !status.IsHealthy() {
+		t.Error("service should be healthy after start")
+	}
+
+	// After stop
+	service.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	status = service.HealthStatus()
+	if status.IsHealthy() {
+		t.Error("service should not be healthy after stop")
+	}
+}
+
+// TestService_IsStale tests staleness detection
+func TestService_IsStale(t *testing.T) {
+	mockClient := &mockSQSClient{}
+	mockHandler := &mockHandler{}
+
+	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{}}`)
+
+	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
+	service := consumer.NewService(mockClient, mockHandler, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = service.Start(ctx)
+	}()
+
+	// Wait for message to be processed
+	time.Sleep(500 * time.Millisecond)
+
+	status := service.HealthStatus()
+
+	// Should not be stale immediately after processing
+	if status.IsStale(1 * time.Second) {
+		t.Error("service should not be stale immediately after processing")
+	}
+
+	// Should be stale after enough time
+	time.Sleep(2 * time.Second)
+	status = service.HealthStatus()
+	if !status.IsStale(1 * time.Second) {
+		t.Error("service should be stale after threshold")
+	}
+
+	service.Stop()
+}
+
+// TestService_ReceiveError tests handling of SQS receive errors
+func TestService_ReceiveError(t *testing.T) {
+	mockClient := &mockSQSClient{
+		receiveError: errors.New("simulated SQS error"),
+	}
+	mockHandler := &mockHandler{}
+
+	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
+
+	service := consumer.NewService(mockClient, mockHandler, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = service.Start(ctx)
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	service.Stop()
+
+	// Verify no handler calls (receive failed)
+	if count := mockHandler.getCallCount(); count != 0 {
+		t.Errorf("expected no handler calls on receive error, got %d", count)
+	}
+
+	// Verify receive was attempted
+	if count := mockClient.receiveCallCount.Load(); count < 1 {
+		t.Error("expected at least one receive attempt")
+	}
 }

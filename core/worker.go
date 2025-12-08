@@ -75,6 +75,13 @@ func (w *Worker) Run(ctx context.Context) {
 				w.logger.ErrorContext(ctx, "process error", "error", err)
 				currentInterval = min(currentInterval*2, w.maxPollInterval)
 			}
+			// Properly reset timer: stop it first, drain channel if needed, then reset
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			timer.Reset(currentInterval)
 		}
 	}

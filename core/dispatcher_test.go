@@ -109,7 +109,7 @@ func (s *DispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublishing()
 	err = dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 
-	// Wait for async AutoRecover to complete
+	// Wait for AutoRecover goroutine to complete
 	time.Sleep(100 * time.Millisecond)
 
 	// Assert
