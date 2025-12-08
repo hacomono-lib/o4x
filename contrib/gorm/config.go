@@ -16,6 +16,10 @@ type Config struct {
 	RequeueBackoffBase time.Duration
 	// RequeueBackoffMax is the maximum backoff interval (default: 1 hour)
 	RequeueBackoffMax time.Duration
+	// StuckPublishingThreshold is the time duration after which messages stuck in PUBLISHING state
+	// are considered crashed and will be recovered to FAILED state by ReviveStuckPublishing.
+	// Default: 5 minutes.
+	StuckPublishingThreshold time.Duration
 }
 
 // Option is a function that modifies Config
@@ -24,10 +28,11 @@ type Option func(*Config)
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		OutboxTableName:    "outbox",
-		InboxTableName:     "consumer_inbox",
-		RequeueBackoffBase: 1 * time.Second,
-		RequeueBackoffMax:  1 * time.Hour,
+		OutboxTableName:          "outbox",
+		InboxTableName:           "consumer_inbox",
+		RequeueBackoffBase:       1 * time.Second,
+		RequeueBackoffMax:        1 * time.Hour,
+		StuckPublishingThreshold: 5 * time.Minute,
 	}
 }
 
@@ -52,6 +57,13 @@ func WithInboxTableName(name string) Option {
 	}
 	return func(c *Config) {
 		c.InboxTableName = name
+	}
+}
+
+// WithStuckPublishingThreshold sets the threshold for detecting stuck messages in PUBLISHING state.
+func WithStuckPublishingThreshold(threshold time.Duration) Option {
+	return func(c *Config) {
+		c.StuckPublishingThreshold = threshold
 	}
 }
 

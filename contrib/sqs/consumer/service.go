@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -90,7 +91,7 @@ type Service struct {
 	mu              sync.Mutex
 	running         bool
 	pendingShutdown bool
-	lastProcessedAt *time.Time
+	lastProcessedAt atomic.Pointer[time.Time]
 }
 
 // NewService creates a new consumer service.
@@ -388,11 +389,9 @@ func (s *Service) processMessage(ctx context.Context, sqsMsg sqstypes.Message, l
 
 	logger.InfoContext(ctx, "message consumed successfully")
 
-	// Update last processed timestamp for health checks
+	// Update last processed timestamp for health checks (lock-free)
 	now := time.Now()
-	s.mu.Lock()
-	s.lastProcessedAt = &now
-	s.mu.Unlock()
+	s.lastProcessedAt.Store(&now)
 }
 
 // handleFailure handles a failed message processing attempt.
@@ -488,11 +487,15 @@ func (s *Service) IsRunning() bool {
 //	})
 func (s *Service) HealthStatus() core.HealthStatus {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	running := s.running
+	pendingShutdown := s.pendingShutdown
+	workerCount := s.config.WorkerCount
+	s.mu.Unlock()
+
 	return core.HealthStatus{
-		Running:         s.running,
-		LastProcessedAt: s.lastProcessedAt,
-		WorkerCount:     s.config.WorkerCount,
-		PendingShutdown: s.pendingShutdown,
+		Running:         running,
+		LastProcessedAt: s.lastProcessedAt.Load(),
+		WorkerCount:     workerCount,
+		PendingShutdown: pendingShutdown,
 	}
 }

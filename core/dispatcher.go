@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,7 +75,7 @@ type Dispatcher struct {
 	mu              sync.Mutex
 	running         bool
 	pendingShutdown bool
-	lastProcessedAt *time.Time
+	lastProcessedAt atomic.Pointer[time.Time]
 }
 
 // NewDispatcher creates a new Dispatcher with configuration validation
@@ -191,12 +192,10 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	for i := 0; i < d.config.WorkerCount; i++ {
 		worker := NewWorker(i, d.repo, d.publisher, d.config.Logger, d.config.Hooks,
 			d.config.PollInterval, d.config.MaxPollInterval, d.config.CleanupTimeout)
-		// Set callback to update lastProcessedAt for health checks
+		// Set callback to update lastProcessedAt for health checks (lock-free)
 		worker.onMessageProcessed = func() {
 			now := time.Now()
-			d.mu.Lock()
-			d.lastProcessedAt = &now
-			d.mu.Unlock()
+			d.lastProcessedAt.Store(&now)
 		}
 		d.workers = append(d.workers, worker)
 
@@ -303,11 +302,15 @@ func (d *Dispatcher) runRequeueWorker(ctx context.Context) {
 //	})
 func (d *Dispatcher) HealthStatus() HealthStatus {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	running := d.running
+	pendingShutdown := d.pendingShutdown
+	workerCount := d.config.WorkerCount
+	d.mu.Unlock()
+
 	return HealthStatus{
-		Running:         d.running,
-		LastProcessedAt: d.lastProcessedAt,
-		WorkerCount:     d.config.WorkerCount,
-		PendingShutdown: d.pendingShutdown,
+		Running:         running,
+		LastProcessedAt: d.lastProcessedAt.Load(),
+		WorkerCount:     workerCount,
+		PendingShutdown: pendingShutdown,
 	}
 }

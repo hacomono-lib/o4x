@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -85,7 +86,7 @@ type BatchDispatcher struct {
 	mu              sync.Mutex
 	running         bool
 	pendingShutdown bool
-	lastProcessedAt *time.Time
+	lastProcessedAt atomic.Pointer[time.Time]
 }
 
 // NewBatchDispatcher creates a new BatchDispatcher with configuration validation
@@ -393,12 +394,10 @@ func (d *BatchDispatcher) processBatch(ctx context.Context, logger *slog.Logger)
 	// Hook: OnBatchPublishComplete
 	d.config.Hooks.callOnBatchPublishComplete(ctx, len(successIDs), failureCount, duration)
 
-	// Update last processed timestamp for health checks
+	// Update last processed timestamp for health checks (lock-free)
 	if len(msgs) > 0 {
 		now := time.Now()
-		d.mu.Lock()
-		d.lastProcessedAt = &now
-		d.mu.Unlock()
+		d.lastProcessedAt.Store(&now)
 	}
 
 	return len(msgs)
@@ -517,11 +516,15 @@ func (d *BatchDispatcher) IsRunning() bool {
 //	})
 func (d *BatchDispatcher) HealthStatus() HealthStatus {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	running := d.running
+	pendingShutdown := d.pendingShutdown
+	workerCount := d.config.WorkerCount
+	d.mu.Unlock()
+
 	return HealthStatus{
-		Running:         d.running,
-		LastProcessedAt: d.lastProcessedAt,
-		WorkerCount:     d.config.WorkerCount,
-		PendingShutdown: d.pendingShutdown,
+		Running:         running,
+		LastProcessedAt: d.lastProcessedAt.Load(),
+		WorkerCount:     workerCount,
+		PendingShutdown: pendingShutdown,
 	}
 }

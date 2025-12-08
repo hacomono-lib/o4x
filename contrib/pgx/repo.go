@@ -102,7 +102,7 @@ const (
 		    ),
 		    updated_at = now()
 		WHERE status = 'PUBLISHING'
-		  AND updated_at < now() - interval '5 minutes'`
+		  AND updated_at < now() - $3::interval`
 
 	queryFetchLockAndMarkPublishing = `
 		WITH locked AS (
@@ -143,11 +143,12 @@ type querier interface {
 
 // OutboxRepository implements core.OutboxRepository for PostgreSQL using pgx
 type OutboxRepository struct {
-	pool        *pgxpool.Pool
-	q           querier // either pool or tx
-	tableName   string
-	backoffBase time.Duration
-	backoffMax  time.Duration
+	pool                     *pgxpool.Pool
+	q                        querier // either pool or tx
+	tableName                string
+	backoffBase              time.Duration
+	backoffMax               time.Duration
+	stuckPublishingThreshold time.Duration
 }
 
 // NewOutboxRepository creates a new PostgreSQL outbox repository
@@ -160,11 +161,12 @@ func NewOutboxRepository(pool *pgxpool.Pool, opts ...Option) *OutboxRepository {
 	}
 
 	return &OutboxRepository{
-		pool:        pool,
-		q:           pool,
-		tableName:   cfg.OutboxTableName,
-		backoffBase: cfg.RequeueBackoffBase,
-		backoffMax:  cfg.RequeueBackoffMax,
+		pool:                     pool,
+		q:                        pool,
+		tableName:                cfg.OutboxTableName,
+		backoffBase:              cfg.RequeueBackoffBase,
+		backoffMax:               cfg.RequeueBackoffMax,
+		stuckPublishingThreshold: cfg.StuckPublishingThreshold,
 	}
 }
 
@@ -186,11 +188,12 @@ func NewOutboxRepository(pool *pgxpool.Pool, opts ...Option) *OutboxRepository {
 //	tx.Commit(ctx)
 func (r *OutboxRepository) WithTx(tx pgx.Tx) *OutboxRepository {
 	return &OutboxRepository{
-		pool:        r.pool,
-		q:           tx,
-		tableName:   r.tableName,
-		backoffBase: r.backoffBase,
-		backoffMax:  r.backoffMax,
+		pool:                     r.pool,
+		q:                        tx,
+		tableName:                r.tableName,
+		backoffBase:              r.backoffBase,
+		backoffMax:               r.backoffMax,
+		stuckPublishingThreshold: r.stuckPublishingThreshold,
 	}
 }
 
@@ -452,15 +455,16 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, top
 // This should be called once at startup to recover from crashes.
 // PUBLISHING -> FAILED (will be retried by RequeueFailed)
 //
-// Only revives messages that have been in PUBLISHING state for more than 5 minutes,
-// preventing recovery of messages actively being processed.
+// Only revives messages that have been in PUBLISHING state for more than the configured
+// threshold (default: 5 minutes), preventing recovery of messages actively being processed.
 //
 // Note: retry_count is incremented to ensure max_retries limit is enforced.
 // This prevents infinite retries for messages that consistently fail.
 // Messages exceeding max_retries will be moved to DEAD on next retry attempt.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	query := fmt.Sprintf(queryReviveStuckPublishing, r.tableName)
-	result, err := r.q.Exec(ctx, query, r.backoffBase, r.backoffMax)
+	intervalStr := fmt.Sprintf("%d seconds", int64(r.stuckPublishingThreshold.Seconds()))
+	result, err := r.q.Exec(ctx, query, r.backoffBase, r.backoffMax, intervalStr)
 	if err != nil {
 		return 0, err
 	}
