@@ -115,9 +115,15 @@ func (s *BatchDispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublish
 	err = dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 
+	// Wait for async AutoRecover to complete
+	time.Sleep(100 * time.Millisecond)
+
 	// Assert
 	assert.NoError(s.T(), err)
-	assert.Equal(s.T(), 1, s.repo.ReviveStuckPublishingCalls)
+	s.repo.mu.Lock()
+	calls := s.repo.ReviveStuckPublishingCalls
+	s.repo.mu.Unlock()
+	assert.Equal(s.T(), 1, calls)
 }
 
 func (s *BatchDispatcherSuite) TestStart_WithoutAutoRecover_DoesNotCallReviveStuckPublishing() {
