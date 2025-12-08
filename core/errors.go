@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"unicode/utf8"
 )
 
 var (
@@ -210,7 +211,7 @@ func sanitizeSensitiveInfo(msg string) string {
 // TruncateErrorMessage truncates an error message to MaxErrorMessageLength bytes
 // and redacts sensitive information such as API keys, passwords, and tokens.
 // If the message is longer, it appends "... (truncated)" to indicate truncation.
-// OPTIMIZED: O(n) implementation using utf8.ValidString for correct UTF-8 boundary detection
+// Uses utf8.ValidString for correct UTF-8 boundary detection.
 func TruncateErrorMessage(msg string) string {
 	// First, sanitize sensitive information
 	msg = sanitizeSensitiveInfo(msg)
@@ -230,27 +231,9 @@ func TruncateErrorMessage(msg string) string {
 
 	// Ensure we don't split a UTF-8 character by removing bytes from the end
 	// until we have a valid UTF-8 string. This is O(k) where k <= 4 (max UTF-8 byte length).
-	for truncated != "" && !isValidUTF8String(truncated) {
+	for truncated != "" && !utf8.ValidString(truncated) {
 		truncated = truncated[:len(truncated)-1]
 	}
 
 	return truncated + suffix
-}
-
-// isValidUTF8String checks if a string is valid UTF-8.
-// This is inlined to avoid import overhead for a simple check.
-func isValidUTF8String(s string) bool {
-	// Check if the last rune is complete
-	if s == "" {
-		return true
-	}
-	// If the last byte is an ASCII character (< 128), it's valid
-	lastByte := s[len(s)-1]
-	if lastByte < 0x80 {
-		return true
-	}
-	// Otherwise, check if it's a valid UTF-8 start byte (not a continuation byte)
-	// UTF-8 continuation bytes start with 10xxxxxx (0x80-0xBF)
-	// Valid start bytes: 0xxxxxxx, 110xxxxx, 1110xxxx, 11110xxx
-	return (lastByte & 0xC0) != 0x80
 }

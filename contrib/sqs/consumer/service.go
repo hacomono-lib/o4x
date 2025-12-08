@@ -161,9 +161,22 @@ func (s *Service) Start(ctx context.Context) error {
 
 	s.mu.Unlock()
 
+	// Warn about potential DB connection pool exhaustion with high concurrency
+	totalConcurrency := s.config.WorkerCount * s.config.MessageConcurrency
+	if totalConcurrency > 50 {
+		s.config.Logger.WarnContext(ctx, "high message concurrency may exhaust DB connection pool",
+			"worker_count", s.config.WorkerCount,
+			"message_concurrency", s.config.MessageConcurrency,
+			"total_concurrency", totalConcurrency,
+			"recommendation", "ensure DB connection pool size >= total_concurrency + margin (e.g., 20% extra)",
+		)
+	}
+
 	s.config.Logger.InfoContext(ctx, "starting consumer service",
 		"queue_url", s.config.QueueURL,
 		"worker_count", s.config.WorkerCount,
+		"message_concurrency", s.config.MessageConcurrency,
+		"total_concurrency", totalConcurrency,
 	)
 
 	for i := 0; i < s.config.WorkerCount; i++ {

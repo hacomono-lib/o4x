@@ -203,14 +203,17 @@ func (d *BatchDispatcher) Start(ctx context.Context) error {
 	d.mu.Unlock()
 
 	// Auto-recover stuck messages if enabled and repository supports it
+	// Run asynchronously to prevent blocking dispatcher startup
 	if d.config.AutoRecover {
 		if recovery, ok := d.repo.(OutboxRecovery); ok {
-			count, err := recovery.ReviveStuckPublishing(ctx)
-			if err != nil {
-				d.config.Logger.ErrorContext(ctx, "failed to recover stuck messages at startup", "error", err)
-			} else if count > 0 {
-				d.config.Logger.InfoContext(ctx, "recovered stuck messages at startup", "count", count)
-			}
+			go func() {
+				count, err := recovery.ReviveStuckPublishing(ctx)
+				if err != nil {
+					d.config.Logger.ErrorContext(ctx, "failed to recover stuck messages at startup", "error", err)
+				} else if count > 0 {
+					d.config.Logger.InfoContext(ctx, "recovered stuck messages at startup", "count", count)
+				}
+			}()
 		} else {
 			d.config.Logger.WarnContext(ctx, "AutoRecover is enabled but repository does not implement OutboxRecovery. "+
 				"Consider calling ReviveStuckPublishing manually at startup to prevent message loss.")
@@ -287,7 +290,15 @@ func (d *BatchDispatcher) runBatchWorker(ctx context.Context, workerID int) {
 
 	currentInterval := d.config.PollInterval
 	timer := time.NewTimer(currentInterval)
-	defer timer.Stop()
+	defer func() {
+		if !timer.Stop() {
+			// Drain the channel if timer fired between Stop and defer
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
 
 	for {
 		select {

@@ -32,6 +32,10 @@ type DispatcherConfig struct {
 	// When true, ReviveStuckPublishing is called if the repository implements OutboxRecovery.
 	// Defaults to true.
 	AutoRecover bool
+	// RequeueInterval is how often to run RequeueFailed.
+	// IMPORTANT: If set to 0, FAILED messages will NEVER be retried automatically.
+	// Recommended: 10s for normal workloads, 1s for high-priority messages.
+	RequeueInterval time.Duration
 	// Logger for dispatcher operations
 	Logger *slog.Logger
 	// Hooks for observability and metrics collection (optional)
@@ -52,6 +56,7 @@ func DefaultDispatcherConfig() DispatcherConfig {
 		ForceTimeout:    60 * time.Second,
 		OnForceShutdown: func() { os.Exit(1) },
 		AutoRecover:     true,
+		RequeueInterval: 10 * time.Second,
 		CleanupTimeout:  10 * time.Second,
 		Logger:          slog.Default(),
 	}
@@ -153,23 +158,33 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	d.mu.Unlock()
 
 	// Auto-recover stuck messages if enabled and repository supports it
+	// Run asynchronously to prevent blocking dispatcher startup
 	if d.config.AutoRecover {
 		if recovery, ok := d.repo.(OutboxRecovery); ok {
-			count, err := recovery.ReviveStuckPublishing(ctx)
-			if err != nil {
-				d.config.Logger.ErrorContext(ctx, "failed to recover stuck messages at startup", "error", err)
-			} else if count > 0 {
-				d.config.Logger.InfoContext(ctx, "recovered stuck messages at startup", "count", count)
-			}
+			go func() {
+				count, err := recovery.ReviveStuckPublishing(ctx)
+				if err != nil {
+					d.config.Logger.ErrorContext(ctx, "failed to recover stuck messages at startup", "error", err)
+				} else if count > 0 {
+					d.config.Logger.InfoContext(ctx, "recovered stuck messages at startup", "count", count)
+				}
+			}()
 		} else {
 			d.config.Logger.WarnContext(ctx, "AutoRecover is enabled but repository does not implement OutboxRecovery. "+
 				"Consider calling ReviveStuckPublishing manually at startup to prevent message loss.")
 		}
 	}
 
+	// Warn if RequeueInterval is 0 (FAILED messages will never retry automatically)
+	if d.config.RequeueInterval == 0 {
+		d.config.Logger.WarnContext(ctx, "RequeueInterval is 0 - FAILED messages will not be retried automatically. "+
+			"Set RequeueInterval to enable automatic retries.")
+	}
+
 	d.config.Logger.InfoContext(ctx, "starting dispatcher",
 		"worker_count", d.config.WorkerCount,
 		"poll_interval", d.config.PollInterval,
+		"requeue_interval", d.config.RequeueInterval,
 	)
 
 	// Start workers
@@ -190,6 +205,15 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			defer d.wg.Done()
 			w.Run(workerCtx)
 		}(worker)
+	}
+
+	// Start requeue worker if enabled
+	if d.config.RequeueInterval > 0 {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.runRequeueWorker(workerCtx)
+		}()
 	}
 
 	return nil
@@ -229,6 +253,34 @@ func (d *Dispatcher) IsRunning() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.running
+}
+
+// runRequeueWorker periodically moves FAILED messages back to ENQUEUED
+func (d *Dispatcher) runRequeueWorker(ctx context.Context) {
+	logger := d.config.Logger.With("worker_type", "requeue")
+	logger.InfoContext(ctx, "requeue worker started",
+		"interval", d.config.RequeueInterval,
+	)
+
+	ticker := time.NewTicker(d.config.RequeueInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.InfoContext(ctx, "requeue worker stopped")
+			return
+		case <-ticker.C:
+			count, err := d.repo.RequeueFailed(ctx)
+			if err != nil {
+				logger.ErrorContext(ctx, "failed to requeue failed messages", "error", err)
+			} else if count > 0 {
+				logger.InfoContext(ctx, "requeued failed messages", "count", count)
+			} else {
+				logger.DebugContext(ctx, "requeue completed, no messages eligible")
+			}
+		}
+	}
 }
 
 // HealthStatus returns the current health status of the dispatcher.

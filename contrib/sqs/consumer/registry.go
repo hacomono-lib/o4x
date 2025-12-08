@@ -33,4 +33,3 @@ func (r *TopicRouterRegistry) ValidGroups() []string {
 	}
 	return groups
 }
-

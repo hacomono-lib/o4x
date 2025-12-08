@@ -20,9 +20,10 @@ const (
 		FROM %s
 		WHERE consumer_name = $1 AND message_id = $2`
 
-	queryInboxInsert = `
+	queryInboxTryStart = `
 		INSERT INTO %s (consumer_name, message_id, status, received_at)
 		VALUES ($1, $2, 'PROCESSING', now())
+		ON CONFLICT (consumer_name, message_id) DO NOTHING
 		RETURNING consumer_name, message_id, status, received_at, processed_at`
 
 	queryInboxComplete = `
@@ -89,41 +90,64 @@ func (r *InboxRepository) WithTx(tx pgx.Tx) *InboxRepository {
 
 // TryStart attempts to mark a message as "PROCESSING" in the inbox.
 //
-// Implementation:
-//   - First checks if record exists
-//   - If exists and status=COMPLETED -> returns (false, nil) - already processed
-//   - If exists and status=PROCESSING -> returns (true, nil) - retry scenario
-//   - If not exists -> INSERT -> returns (true, nil) - first time
+// Implementation (ATOMIC):
+//   - Uses INSERT ... ON CONFLICT DO NOTHING for atomic duplicate detection
+//   - If INSERT succeeds (1 row returned) -> first time processing -> returns (true, nil)
+//   - If INSERT conflicts (0 rows returned) -> duplicate exists -> check status
+//   - If status=COMPLETED -> already processed -> returns (false, nil)
+//   - If status=PROCESSING -> retry scenario -> returns (true, nil)
 //
 // This correctly handles retry scenarios:
-//  1. Initial call: INSERT success -> true
-//  2. Handler fails (e.g., external API) -> error returned
-//  3. SQS retry: Existing record with PROCESSING status -> true (process again)
+//  1. Initial call: INSERT success (1 row) -> true
+//  2. Handler fails (e.g., external API) -> error returned, status=PROCESSING
+//  3. SQS retry: INSERT conflict (0 rows) -> check status=PROCESSING -> true (process again)
 //  4. Handler succeeds -> Complete() called -> status=COMPLETED
-//  5. Next duplicate: Existing record with COMPLETED status -> false (skip)
+//  5. Next duplicate: INSERT conflict (0 rows) -> check status=COMPLETED -> false (skip)
 //
 // Returns:
 //   - (true, nil): Should proceed with processing (first time OR retry)
 //   - (false, nil): Already COMPLETED, safe to skip
 //   - (false, error): Database error occurred
 func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID string) (bool, error) {
-	query := fmt.Sprintf(queryInboxCheckExisting, r.tableName)
+	// Try atomic INSERT with ON CONFLICT DO NOTHING
+	insertQuery := fmt.Sprintf(queryInboxTryStart, r.tableName)
 
-	var existing core.ConsumerInbox
+	var inserted core.ConsumerInbox
 	var processedAt *time.Time
+	var err error
 
-	// 1. Check if record already exists
-	var row pgx.Row
 	if r.tx != nil {
-		row = r.tx.QueryRow(ctx, query, consumerName, messageID)
+		err = r.tx.QueryRow(ctx, insertQuery, consumerName, messageID).
+			Scan(&inserted.ConsumerName, &inserted.MessageID, &inserted.Status, &inserted.ReceivedAt, &processedAt)
 	} else {
-		row = r.pool.QueryRow(ctx, query, consumerName, messageID)
+		err = r.pool.QueryRow(ctx, insertQuery, consumerName, messageID).
+			Scan(&inserted.ConsumerName, &inserted.MessageID, &inserted.Status, &inserted.ReceivedAt, &processedAt)
 	}
 
-	err := row.Scan(&existing.ConsumerName, &existing.MessageID, &existing.Status, &existing.ReceivedAt, &processedAt)
-
+	// INSERT succeeded - first time processing
 	if err == nil {
-		// Record exists - check status
+		return true, nil
+	}
+
+	// INSERT failed due to conflict (pgx.ErrNoRows = no RETURNING data)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Record already exists - check its status
+		query := fmt.Sprintf(queryInboxCheckExisting, r.tableName)
+		var existing core.ConsumerInbox
+
+		var row pgx.Row
+		if r.tx != nil {
+			row = r.tx.QueryRow(ctx, query, consumerName, messageID)
+		} else {
+			row = r.pool.QueryRow(ctx, query, consumerName, messageID)
+		}
+
+		err2 := row.Scan(&existing.ConsumerName, &existing.MessageID, &existing.Status, &existing.ReceivedAt, &processedAt)
+		if err2 != nil {
+			return false, fmt.Errorf("failed to check existing inbox record after conflict: %w", err2)
+		}
+
+		// Check status
 		if existing.Status == core.InboxStatusCompleted {
 			// Already completed - duplicate message
 			return false, nil
@@ -132,44 +156,8 @@ func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID 
 		return true, nil
 	}
 
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return false, fmt.Errorf("failed to check existing inbox record: %w", err)
-	}
-
-	// 2. Record doesn't exist - create new one
-	insertQuery := fmt.Sprintf(queryInboxInsert, r.tableName)
-
-	if r.tx != nil {
-		err = r.tx.QueryRow(ctx, insertQuery, consumerName, messageID).
-			Scan(&existing.ConsumerName, &existing.MessageID, &existing.Status, &existing.ReceivedAt, &processedAt)
-	} else {
-		err = r.pool.QueryRow(ctx, insertQuery, consumerName, messageID).
-			Scan(&existing.ConsumerName, &existing.MessageID, &existing.Status, &existing.ReceivedAt, &processedAt)
-	}
-
-	if err != nil {
-		// Check for unique constraint violation (race condition)
-		// Another goroutine might have inserted the record between our check and insert
-		var row2 pgx.Row
-		if r.tx != nil {
-			row2 = r.tx.QueryRow(ctx, query, consumerName, messageID)
-		} else {
-			row2 = r.pool.QueryRow(ctx, query, consumerName, messageID)
-		}
-
-		var existing2 core.ConsumerInbox
-		err2 := row2.Scan(&existing2.ConsumerName, &existing2.MessageID, &existing2.Status, &existing2.ReceivedAt, &processedAt)
-
-		if err2 == nil {
-			// Record was created by another goroutine - check its status
-			return existing2.Status != core.InboxStatusCompleted, nil
-		}
-
-		return false, fmt.Errorf("failed to insert inbox record: %w", err)
-	}
-
-	// Successfully created - first time processing
-	return true, nil
+	// Unexpected error
+	return false, fmt.Errorf("failed to insert inbox record: %w", err)
 }
 
 // Complete marks a message as "COMPLETED" in the inbox.

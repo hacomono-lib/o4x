@@ -107,75 +107,60 @@ func (r *InboxRepository) WithTx(tx *gorm.DB) *InboxRepository {
 
 // TryStart attempts to mark a message as "PROCESSING" in the inbox.
 //
-// Implementation:
-//   - First checks if record exists
-//   - If exists and status=COMPLETED -> returns (false, nil) - already processed
-//   - If exists and status=PROCESSING -> returns (true, nil) - retry scenario
-//   - If not exists -> INSERT -> returns (true, nil) - first time
+// Implementation (ATOMIC):
+//   - Uses INSERT ... ON CONFLICT DO NOTHING for atomic duplicate detection
+//   - If INSERT succeeds (1 row) -> first time processing -> returns (true, nil)
+//   - If INSERT conflicts (0 rows) -> duplicate exists -> check status
+//   - If status=COMPLETED -> already processed -> returns (false, nil)
+//   - If status=PROCESSING -> retry scenario -> returns (true, nil)
 //
 // This correctly handles retry scenarios:
-//  1. Initial call: INSERT success -> true
-//  2. Handler fails (e.g., external API) -> error returned
-//  3. SQS retry: Existing record with PROCESSING status -> true (process again)
+//  1. Initial call: INSERT success (1 row) -> true
+//  2. Handler fails (e.g., external API) -> error returned, status=PROCESSING
+//  3. SQS retry: INSERT conflict (0 rows) -> check status=PROCESSING -> true (process again)
 //  4. Handler succeeds -> Complete() called -> status=COMPLETED
-//  5. Next duplicate: Existing record with COMPLETED status -> false (skip)
+//  5. Next duplicate: INSERT conflict (0 rows) -> check status=COMPLETED -> false (skip)
 //
 // Returns:
 //   - (true, nil): Should proceed with processing (first time OR retry)
 //   - (false, nil): Already COMPLETED, safe to skip
 //   - (false, error): Database error occurred
 func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID string) (bool, error) {
-	// 1. Check if record already exists
+	// Try atomic INSERT with ON CONFLICT DO NOTHING using raw SQL
+	// GORM doesn't support ON CONFLICT directly, so we use Raw
+	insertQuery := fmt.Sprintf(`
+		INSERT INTO %s (consumer_name, message_id, status, received_at)
+		VALUES (?, ?, 'PROCESSING', NOW())
+		ON CONFLICT (consumer_name, message_id) DO NOTHING
+	`, r.tableName)
+
+	result := r.db.WithContext(ctx).Exec(insertQuery, consumerName, messageID)
+	if result.Error != nil {
+		return false, fmt.Errorf("failed to insert inbox record: %w", result.Error)
+	}
+
+	// INSERT succeeded (1 row affected) - first time processing
+	if result.RowsAffected == 1 {
+		return true, nil
+	}
+
+	// INSERT conflicted (0 rows affected) - record already exists, check its status
 	var existing consumerInboxModel
 	err := r.db.WithContext(ctx).
 		Table(r.tableName).
 		Where("consumer_name = ? AND message_id = ?", consumerName, messageID).
 		First(&existing).Error
 
-	if err == nil {
-		// Record exists - check status
-		if existing.Status == string(core.InboxStatusCompleted) {
-			// Already completed - duplicate message
-			return false, nil
-		}
-		// Still processing - retry scenario (handler failed previously)
-		return true, nil
+	if err != nil {
+		return false, fmt.Errorf("failed to check existing inbox record after conflict: %w", err)
 	}
 
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, fmt.Errorf("failed to check existing inbox record: %w", err)
+	// Check status
+	if existing.Status == string(core.InboxStatusCompleted) {
+		// Already completed - duplicate message
+		return false, nil
 	}
-
-	// 2. Record doesn't exist - create new one
-	model := &consumerInboxModel{
-		ConsumerName: consumerName,
-		MessageID:    messageID,
-		Status:       string(core.InboxStatusProcessing),
-		ReceivedAt:   time.Now(),
-	}
-
-	result := r.db.WithContext(ctx).
-		Table(r.tableName).
-		Create(model)
-
-	if result.Error != nil {
-		// Check for unique constraint violation (race condition)
-		// Another goroutine might have inserted the record between our check and insert
-		var existing2 consumerInboxModel
-		err := r.db.WithContext(ctx).
-			Table(r.tableName).
-			Where("consumer_name = ? AND message_id = ?", consumerName, messageID).
-			First(&existing2).Error
-
-		if err == nil {
-			// Record was created by another goroutine - check its status
-			return existing2.Status != string(core.InboxStatusCompleted), nil
-		}
-
-		return false, fmt.Errorf("failed to insert inbox record: %w", result.Error)
-	}
-
-	// Successfully created - first time processing
+	// Still processing - retry scenario (handler failed previously)
 	return true, nil
 }
 

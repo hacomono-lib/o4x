@@ -47,7 +47,15 @@ func (w *Worker) Run(ctx context.Context) {
 
 	currentInterval := w.pollInterval
 	timer := time.NewTimer(currentInterval)
-	defer timer.Stop()
+	defer func() {
+		if !timer.Stop() {
+			// Drain the channel if timer fired between Stop and defer
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
 
 	for {
 		select {
