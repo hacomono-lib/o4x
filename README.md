@@ -1239,6 +1239,47 @@ func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
 - ❌ Additional parsing overhead
 - ❌ More complex consumer code
 
+#### Alternative: Dispatcher Stop Pattern (Emergency/Large Changes)
+
+For urgent breaking changes when Expand-Contract adds too much complexity, you can temporarily stop the Dispatcher to drain the SQS queue before deploying.
+
+**When to use:**
+- Emergency breaking changes requiring immediate deployment
+- Large-scale schema changes affecting many fields
+- Situations where Expand-Contract dual-support code is impractical
+
+**Deployment Steps:**
+
+1. **Stop Dispatcher** - Prevents new messages from being sent to SQS (API continues to work, outbox writes continue)
+
+2. **Monitor SQS queue until empty** - Wait for Consumer to process all in-flight messages:
+   ```bash
+   # Monitor SQS queue message count
+   aws sqs get-queue-attributes \
+     --queue-url $QUEUE_URL \
+     --attribute-names ApproximateNumberOfMessages
+   ```
+
+3. **Deploy new Consumer** - Deploy Consumer version that expects new schema
+
+4. **Restart Dispatcher** - Accumulated outbox messages are sent to SQS with new schema format
+
+**Benefits:**
+- ✅ API continues to work (outbox writes continue during deployment)
+- ✅ Messages safely stored in outbox table (no data loss)
+- ✅ Guaranteed no old-format messages in SQS queue
+- ✅ Simpler than Expand-Contract for urgent changes (no dual-version code)
+- ⚠️ Message delivery delayed during deployment (typically minutes)
+
+**Comparison with Expand-Contract:**
+
+| Approach | Message Delay | Code Complexity | When to Use |
+|----------|---------------|-----------------|-------------|
+| **Expand-Contract** | None | High (dual-version support) | Planned changes, normal deployments |
+| **Dispatcher Stop** | Minutes | None (config change only) | Emergency fixes, large-scale changes |
+
+**Note:** This pattern is safe because the outbox table acts as a durable buffer. Messages accumulate during Dispatcher downtime and are reliably delivered once restarted.
+
 #### Recommended CLAUDE.md for Your Project (Optional)
 
 If you use **Claude Code** for code reviews, add this to your project's `CLAUDE.md` to automate compatibility checks:
