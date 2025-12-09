@@ -669,9 +669,13 @@ func CleanupWithMetrics(ctx context.Context) error {
 | Option | Default | Description |
 |--------|---------|-------------|
 | `PollInterval` | 100ms | How often to poll for new messages |
+| `MaxPollInterval` | 3200ms (PollInterval * 32) | Maximum polling interval during idle periods |
 | `WorkerCount` | 1 | Number of concurrent workers |
+| `AutoRecover` | true | Automatic recovery of stuck PUBLISHING messages at startup |
+| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. Important: If 0, FAILED messages will not retry automatically |
 | `ShutdownTimeout` | 30s | Time to wait for graceful shutdown (context respected) |
 | `ForceTimeout` | 60s | Hard limit before forceful exit |
+| `CleanupTimeout` | 10s | Timeout for database cleanup operations during shutdown |
 
 **Graceful Shutdown**: Worker and BatchDispatcher respect context cancellation. Cleanup operations (UpdateToPublished, UpdateToFailed) use derived context with 10s timeout to allow DB updates while respecting cancellation signals.
 
@@ -705,6 +709,8 @@ func CleanupWithMetrics(ctx context.Context) error {
 | `MaxRetries` | 5 | Max processing attempts |
 | `WorkerCount` | 1 | Number of concurrent workers |
 | `MessageConcurrency` | 1 | Messages processed concurrently per worker (>1 only for Standard queues) |
+| `ShutdownTimeout` | 30s | Time to wait for graceful shutdown before warning |
+| `ForceTimeout` | 60s | Hard limit before forceful exit |
 
 **MessageConcurrency** (new feature):
 - Controls parallel message processing within each worker

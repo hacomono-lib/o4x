@@ -73,6 +73,14 @@ go run examples/app/cmd/api/main.go
 
 **Workflow**: Code → `make lint` → fix errors → `make test-short` → commit
 
+### Documentation Sync
+
+**CRITICAL**: When modifying Config structures, update README.md configuration tables simultaneously.
+
+- `DispatcherConfig` → README "Dispatcher Config" section
+- `BatchDispatcherConfig` → README "BatchDispatcher Config" section
+- `ServiceConfig` → README "Consumer Config" section
+
 ### Environment Variables
 
 ```bash
