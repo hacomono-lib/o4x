@@ -1116,6 +1116,161 @@ hooks := &core.Hooks{
 }
 ```
 
+### Payload Schema Evolution and Deployment
+
+When modifying message payloads, understanding backward compatibility is critical to avoid breaking running consumers during deployment.
+
+#### Safe Changes (Backward Compatible)
+
+✅ **Adding optional fields** - Old consumers ignore new fields:
+```go
+// Before
+type OrderCreated struct {
+    OrderID string `json:"order_id"`
+}
+
+// After - Safe: old consumers still work
+type OrderCreated struct {
+    OrderID   string `json:"order_id"`
+    UserEmail string `json:"user_email,omitempty"` // NEW field
+}
+```
+
+✅ **Adding new event types** - Existing consumers unaffected
+
+#### Breaking Changes (NOT Backward Compatible)
+
+❌ **Removing fields** - Old consumers expect the field, will fail/panic
+❌ **Renaming fields** - Old consumers can't find the field
+❌ **Changing field types** - Unmarshal errors (string → int, etc.)
+❌ **Changing field semantics** - Same field name, different meaning
+
+#### Two-Phase Deployment for Breaking Changes (Expand-Contract Pattern)
+
+When you must make breaking changes, use a **two-phase deployment**:
+
+**Phase 1: Expand (Add Support for Both Versions)**
+
+1. Deploy Consumer first with dual support:
+```go
+type OrderCreated struct {
+    OrderID     string `json:"order_id"`
+    CustomerID  string `json:"customer_id"`      // NEW field
+    UserID      string `json:"user_id"`          // OLD field (deprecated)
+}
+
+func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    var event OrderCreated
+    json.Unmarshal(msg.Body, &event)
+
+    // Support both old and new fields
+    customerID := event.CustomerID
+    if customerID == "" {
+        customerID = event.UserID // Fallback to old field
+    }
+    // ... use customerID
+}
+```
+
+2. Deploy Producer to send both fields:
+```go
+payload := OrderCreated{
+    OrderID:    "123",
+    CustomerID: "user-456", // NEW field
+    UserID:     "user-456", // OLD field (for old consumers)
+}
+```
+
+**Phase 2: Contract (Remove Old Version)**
+
+After all consumers updated (verify metrics/logs):
+
+1. Update Producer to send only new fields
+2. Update Consumer to remove old field support
+3. Remove deprecated fields from struct
+
+**Deployment Order Guidelines:**
+
+| Scenario | Deploy Order | Rationale |
+|----------|-------------|-----------|
+| **Adding fields** | Producer first, then Consumer | Safe - old consumers ignore new fields |
+| **Breaking changes** | **Consumer first**, then Producer | Consumer must handle both old/new before Producer sends new format |
+| **Rolling updates** | Consumer, wait for 100% rollout, then Producer | Ensures no old consumer receives new format |
+
+**Critical Rule:** During rolling updates, **old and new consumers coexist**. Producer must send format that both versions understand until 100% of consumers updated.
+
+#### Version Field Pattern (Advanced)
+
+For complex schema evolution, use explicit versioning:
+
+```go
+type EventEnvelope struct {
+    Version string          `json:"version"` // "v1", "v2"
+    Payload json.RawMessage `json:"payload"`
+}
+
+func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
+    var envelope EventEnvelope
+    json.Unmarshal(msg.Body, &envelope)
+
+    switch envelope.Version {
+    case "v1":
+        var v1 OrderCreatedV1
+        json.Unmarshal(envelope.Payload, &v1)
+        return h.handleV1(ctx, v1)
+    case "v2":
+        var v2 OrderCreatedV2
+        json.Unmarshal(envelope.Payload, &v2)
+        return h.handleV2(ctx, v2)
+    default:
+        return fmt.Errorf("unsupported version: %s", envelope.Version)
+    }
+}
+```
+
+**When to use versioning:**
+- Multiple breaking changes planned
+- Long-lived messages in queue (>1 week retention)
+- Complex payload with frequent evolution
+
+**Trade-offs:**
+- ✅ Explicit compatibility contracts
+- ✅ Easier to maintain multiple versions
+- ❌ Additional parsing overhead
+- ❌ More complex consumer code
+
+#### Recommended CLAUDE.md for Your Project (Optional)
+
+If you use **Claude Code** for code reviews, add this to your project's `CLAUDE.md` to automate compatibility checks:
+
+```markdown
+## o4x Message Schema Review Checklist
+
+When reviewing PRs that modify message payloads or handlers, verify:
+
+**Payload Compatibility:**
+- [ ] Is this change backward compatible?
+- [ ] Breaking changes use Expand-Contract pattern (dual field support)?
+- [ ] Deployment order documented (Consumer first for breaking changes)?
+- [ ] Safe: Adding optional fields ✅
+- [ ] Unsafe: Removing/renaming fields, changing types ❌
+
+**Idempotency Implementation:**
+- [ ] Handler is idempotent (handles duplicate messages correctly)
+- [ ] Pattern chosen based on use case:
+  - DB-only operations → InboxRepository with transaction
+  - External API with idempotency keys → InboxRepository (transaction or auto-commit)
+  - Naturally idempotent logic (INSERT ... ON CONFLICT DO NOTHING) → InboxRepository auto-commit or application-level
+- [ ] Handler returns `nil` for duplicates (not error)
+- [ ] External API calls without idempotency support → Reject async messaging approach
+
+**Deployment Safety:**
+- [ ] Rolling update compatibility verified (old/new consumers coexist)
+- [ ] No in-flight messages will break during deployment
+```
+
+This ensures Claude catches compatibility issues during PR reviews before deployment.
+
 ### Performance Tuning
 
 **BatchDispatcher Configuration:**
