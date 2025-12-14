@@ -235,6 +235,14 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 
 SQS provides at-least-once delivery, so handlers must be idempotent.
 
+**CRITICAL: External APIs Without Idempotency Support**
+
+If the external API does **NOT** support idempotency:
+- ❌ **Do NOT use asynchronous messaging for that operation**
+- ✅ **Handle it synchronously instead**
+
+At-least-once delivery guarantees mean duplicate calls WILL happen. Without idempotency keys, you cannot prevent duplicate charges, duplicate emails, or duplicate state changes in the external system.
+
 #### Decision Tree
 
 1. **Does your handler involve external API calls?**
@@ -258,14 +266,31 @@ SQS provides at-least-once delivery, so handlers must be idempotent.
 #### Best Practices
 
 1. **DB operations only**: Use `InboxRepository` with transaction ✅
-2. **External API with idempotency key support**: Use `InboxRepository` ✅
-3. **External API without idempotency support**: **Don't use async messaging** ⛔
+2. **External API with idempotency key support**: Use `InboxRepository` + pass message_id as idempotency key ✅
+3. **External API without idempotency support**: **Don't use async messaging - handle synchronously instead** ⛔
 4. **Prefer transaction pattern**: Safer default unless performance is critical
 5. Set cleanup TTLs via `InboxCleaner.DeleteOlderThan()` (completed: 7-30d, processing: 30-90d)
 6. Monitor stuck messages in 'processing' status (indicates handler crashes)
 7. **Important**: Return `nil` on duplicates, not an error
 
 #### InboxRepository Implementation Notes
+
+**IMPORTANT: TryStart is NOT Exclusive Locking**
+
+`TryStart()` **does not provide exclusive or mutual exclusion semantics**.
+
+Multiple consumer workers may pass `TryStart()` concurrently for the same message.
+This is an intentional design choice.
+
+- `TryStart()` is an **optimistic gate**, not a lock
+- The inbox table represents **completed messages only**
+- In-flight processing is controlled by the message broker (e.g. SQS visibility timeout)
+- The only definitive point is `Complete()`
+
+```text
+TryStart   : optimistic check (may pass concurrently)
+Complete   : final commit (single source of truth)
+```
 
 **Defense in Depth Design:**
 - **Primary control**: SQS visibility timeout prevents concurrent processing

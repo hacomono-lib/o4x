@@ -424,6 +424,26 @@ o4x provides **at-least-once delivery** with strong consistency guarantees:
 
 **IMPORTANT:** You must implement idempotency in your message handlers!
 
+**CRITICAL: External APIs Without Idempotency Support**
+
+If your handler calls an external API that does **NOT** support idempotency keys:
+- ❌ **Do NOT use asynchronous messaging for that operation**
+- ✅ **Handle it synchronously instead**
+
+Why? At-least-once delivery guarantees mean duplicate calls WILL occur. Without idempotency keys, you cannot prevent:
+- Duplicate payment charges
+- Duplicate email sends
+- Duplicate state changes in the external system
+- Duplicate resource creation
+
+**Examples:**
+- ✅ Stripe API with `Idempotency-Key` header → Safe to use async
+- ❌ Legacy payment gateway without idempotency support → Must use sync calls
+- ❌ SendGrid Mail Send API (no idempotency support) → Must use sync calls or implement application-level deduplication
+- ❌ Simple SMTP email without deduplication → Must use sync calls
+- ✅ Twilio API with idempotency support → Safe to use async
+- ✅ Shopify Admin API with `X-Shopify-Access-Token` → Safe to use async
+
 Both o4x and SQS guarantee **at-least-once delivery**. This means your consumer may receive the same message multiple times in these scenarios:
 
 - Message processing takes longer than visibility timeout
@@ -486,6 +506,8 @@ func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
 
 **3. Use InboxRepository (Transactional Inbox Pattern)**
 
+**IMPORTANT:** `TryStart()` is NOT an exclusive lock. Multiple workers may call it concurrently for the same message. It's an **optimistic gate**, not mutual exclusion. The inbox table represents **completed messages only**. In-flight processing is controlled by the message broker (SQS visibility timeout). The only definitive point is `Complete()`.
+
 ```go
 // Use InboxRepository for database-level idempotency with transaction support
 inboxRepo := pgx.NewInboxRepository(pool)
@@ -495,6 +517,7 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
     defer tx.Rollback(ctx)
 
     // Check idempotency (within transaction)
+    // NOTE: TryStart is an optimistic check, not an exclusive lock
     inboxTx := inboxRepo.WithTx(tx)
     ok, _ := inboxTx.TryStart(ctx, "HandlerName", msg.MessageID)
     if !ok {
@@ -504,7 +527,7 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
     // Process message (same transaction)
     // ... business logic ...
 
-    // Mark completed
+    // Mark completed (single source of truth)
     inboxTx.Complete(ctx, "HandlerName", msg.MessageID)
 
     return tx.Commit(ctx)
@@ -515,6 +538,10 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 // - Race-safe duplicate detection via (consumer_name, message_id) primary key
 // - Audit trail: Processing status and timestamps
 // - See CLAUDE.md for detailed usage patterns
+
+// Key Concepts:
+// TryStart   : optimistic check (may pass concurrently)
+// Complete   : final commit (single source of truth)
 ```
 
 **4. Make Operations Idempotent**
@@ -532,6 +559,8 @@ Design your business logic to be naturally idempotent:
 #### Best Practices
 
 - **Always check IdempotencyKey** before processing
+- **External APIs without idempotency support**: Do NOT use async messaging - handle synchronously instead ⛔
+- **External APIs with idempotency support**: Pass `msg.MessageID` or `msg.IdempotencyKey` to the API
 - **Use TTL for cleanup** - Processed keys don't need to live forever (7-30 days is typical)
 - **Return nil for duplicates** - To ACK the message and remove it from the queue
 - **Log duplicate detections** - For monitoring and debugging
