@@ -94,7 +94,7 @@ func CreateOrder(ctx context.Context, db *gorm.DB, order Order) error {
 
     payload, _ := json.Marshal(order)
     _, err := txRepo.Insert(ctx, core.OutboxInsertParams{
-        Topic:          "order.created",
+        EventType:      "order.created",
         Payload:        payload,
         IdempotencyKey: fmt.Sprintf("order-%s", order.ID),
         MaxRetries:     10,
@@ -117,7 +117,7 @@ func CreateOrder(ctx context.Context, db *gorm.DB, order Order) error {
 ```go
 // Insert message
 repo.Insert(ctx, core.OutboxInsertParams{
-    Topic:          "user.created",
+    EventType:      "user.created",
     Payload:        json.RawMessage(`{"user_id": "123"}`),
     IdempotencyKey: "user-123-created",
     MaxRetries:     10,
@@ -143,7 +143,7 @@ count, err := repo.ReviveStuckPublishing(ctx)
 
 // Get message
 msg, err := repo.GetByID(ctx, id)
-msg, err := repo.GetByIdempotencyKey(ctx, topic, key)
+msg, err := repo.GetByIdempotencyKey(ctx, eventType, key)
 
 // Cleanup old messages
 count, err := repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 7*24*time.Hour)
@@ -257,10 +257,10 @@ Create these indexes for optimal performance:
 
 ```sql
 -- Outbox table
-CREATE INDEX idx_outbox_status_created ON outbox(status, created_at) 
+CREATE INDEX idx_outbox_status_created ON outbox(status, created_at)
     WHERE status = 'ENQUEUED';
 
-CREATE INDEX idx_outbox_idempotency ON outbox(topic, idempotency_key);
+CREATE INDEX idx_outbox_idempotency ON outbox(event_type, idempotency_key);
 
 -- Consumer inbox table (optional, for idempotency checking)
 -- Primary key (consumer_name, message_id) is automatically indexed
@@ -323,9 +323,9 @@ func CreateUserWithEvent(ctx context.Context, db *gorm.DB, user *User) error {
     // Publish event
     repo := gormrepo.NewOutboxRepository(db).WithTx(tx)
     payload, _ := json.Marshal(user)
-    
+
     _, err := repo.Insert(ctx, core.OutboxInsertParams{
-        Topic:          "user.created",
+        EventType:      "user.created",
         Payload:        payload,
         IdempotencyKey: fmt.Sprintf("user-%d-created", user.ID),
         MaxRetries:     10,
@@ -347,7 +347,7 @@ func (u *User) AfterCreate(tx *gorm.DB) error {
     
     payload, _ := json.Marshal(u)
     _, err := repo.Insert(ctx, core.OutboxInsertParams{
-        Topic:          "user.created",
+        EventType:      "user.created",
         Payload:        payload,
         IdempotencyKey: fmt.Sprintf("user-%d-created", u.ID),
         MaxRetries:     10,
@@ -373,7 +373,7 @@ func CreateOrdersWithEvents(ctx context.Context, db *gorm.DB, orders []Order) er
     for _, order := range orders {
         payload, _ := json.Marshal(order)
         _, err := repo.Insert(ctx, core.OutboxInsertParams{
-            Topic:          "order.created",
+            EventType:      "order.created",
             Payload:        payload,
             IdempotencyKey: fmt.Sprintf("order-%s", order.ID),
             MaxRetries:     10,

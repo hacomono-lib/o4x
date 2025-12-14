@@ -105,7 +105,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 		return err
 	}
 
-	logger := w.logger.With("outbox_id", msg.ID, "topic", msg.Topic)
+	logger := w.logger.With("outbox_id", msg.ID, "event_type", msg.EventType)
 	logger.DebugContext(ctx, "processing message")
 
 	// Hook: OnPublishStart

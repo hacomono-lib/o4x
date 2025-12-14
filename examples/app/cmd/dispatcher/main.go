@@ -79,11 +79,11 @@ func main() {
 	var publisher core.Publisher
 
 	if *multiQueue {
-		// Multi-queue mode: route topics to different queues
+		// Multi-queue mode: route event types to different queues
 		logger.Info("multi-queue mode enabled")
 
-		// Create topic-to-queue router (default to user queue)
-		router := sqspub.NewTopicQueueMap(userQueueURL)
+		// Create event-type-to-queue router (default to user queue)
+		router := sqspub.NewEventTypeQueueMap(userQueueURL)
 
 		// Route order topics to FIFO queue (strict ordering)
 		router.RegisterPrefix("order.", orderQueueURL)

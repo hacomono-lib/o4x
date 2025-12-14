@@ -48,7 +48,7 @@ func (s *WorkerSuite) TestNewWorker_CreatesWorkerWithCorrectConfig() {
 
 func (s *WorkerSuite) TestWorker_ProcessesMessageSuccessfully() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	worker := NewWorker(0, s.repo, s.publisher, s.logger, nil, 10*time.Millisecond, 100*time.Millisecond, 10*time.Second)
@@ -67,7 +67,7 @@ func (s *WorkerSuite) TestWorker_ProcessesMessageSuccessfully() {
 
 func (s *WorkerSuite) TestWorker_HandlesPublishFailure() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -90,7 +90,7 @@ func (s *WorkerSuite) TestWorker_HandlesPublishFailure() {
 
 func (s *WorkerSuite) TestWorker_MarksMessageDeadAfterMaxRetries() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.topic", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -112,7 +112,7 @@ func (s *WorkerSuite) TestWorker_MarksMessageDeadAfterMaxRetries() {
 
 func (s *WorkerSuite) TestWorker_MarksMessageDeadOnPermanentError() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -134,7 +134,7 @@ func (s *WorkerSuite) TestWorker_MarksMessageDeadOnPermanentError() {
 
 func (s *WorkerSuite) TestWorker_CallsOnPublishStartHook() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	hookCalled := make(chan *Outbox, 1)
@@ -166,7 +166,7 @@ func (s *WorkerSuite) TestWorker_CallsOnPublishStartHook() {
 
 func (s *WorkerSuite) TestWorker_CallsOnPublishSuccessHook() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	hookCalled := make(chan time.Duration, 1)
@@ -198,7 +198,7 @@ func (s *WorkerSuite) TestWorker_CallsOnPublishSuccessHook() {
 
 func (s *WorkerSuite) TestWorker_CallsOnPublishFailureHook() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -239,7 +239,7 @@ func (s *WorkerSuite) TestWorker_CallsOnPublishFailureHook() {
 
 func (s *WorkerSuite) TestWorker_CallsOnMessageDeadHook() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.topic", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -309,7 +309,7 @@ func (s *WorkerSuite) TestWorker_AdaptivePolling_ResetsIntervalWhenMessageFound(
 		// Return a message on the 3rd call to reset interval
 		if count == 3 && !messageReturned {
 			messageReturned = true
-			msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+			msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 			msg.Status = OutboxStatusPublishing // Already marked as PUBLISHING
 			return msg, nil
 		}
@@ -356,7 +356,7 @@ func (s *WorkerSuite) TestWorker_StopsOnContextCancellation() {
 
 func (s *WorkerSuite) TestWorker_UpdatesStatusToPublishingBeforePublish() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	publishDone := make(chan OutboxStatus, 1)
@@ -388,7 +388,7 @@ func (s *WorkerSuite) TestWorker_UpdatesStatusToPublishingBeforePublish() {
 
 func (s *WorkerSuite) TestWorker_HandlesTransientErrorAsRetryable() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {

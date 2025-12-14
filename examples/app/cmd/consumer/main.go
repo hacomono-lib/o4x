@@ -156,22 +156,22 @@ func main() {
 	}
 
 	// Create router registry
-	registry := consumer.NewTopicRouterRegistry()
+	registry := consumer.NewEventTypeRouterRegistry()
 
 	// Register order handlers
-	registry.RegisterGroup("order", func(r *consumer.TopicRouter) {
+	registry.RegisterGroup("order", func(r *consumer.EventTypeRouter) {
 		r.Register("order.created", appconsumer.NewOrderCreatedHandler(pool, notificationService, logger, orderCreatedSleep))
 		r.Register("order.confirmed", appconsumer.NewOrderConfirmedHandler(pool, inboxRepo, logger, orderConfirmedSleep))
 	})
 
 	// Register user handlers
-	registry.RegisterGroup("user", func(r *consumer.TopicRouter) {
+	registry.RegisterGroup("user", func(r *consumer.EventTypeRouter) {
 		r.Register("user.registered", appconsumer.NewUserRegisteredHandler(pool, inboxRepo, logger, userRegisteredSleep))
 		r.Register("user.updated", appconsumer.NewUserUpdatedHandler(pool, logger, userUpdatedSleep))
 	})
 
 	// Register notification handlers
-	registry.RegisterGroup("notification", func(r *consumer.TopicRouter) {
+	registry.RegisterGroup("notification", func(r *consumer.EventTypeRouter) {
 		r.Register("notification.email", appconsumer.NewNotificationEmailHandler(
 			pool, inboxRepo, notificationRepo, logger, *simulateFailure, *failureRate, notificationEmailSleep,
 		))
@@ -188,10 +188,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set fallback handler for unknown topics
+	// Set fallback handler for unknown event types
 	selectedRouter.SetFallback(consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
-		logger.Warn("unhandled topic",
-			"topic", msg.Topic,
+		logger.Warn("unhandled event type",
+			"event_type", msg.EventType,
 			"message_id", msg.MessageID,
 			"group", groupName,
 		)
@@ -200,7 +200,7 @@ func main() {
 
 	logger.Info("handler group registered",
 		"group", groupName,
-		"topics", selectedRouter.Topics(),
+		"topics", selectedRouter.EventTypes(),
 	)
 
 	// Initialize consumer service

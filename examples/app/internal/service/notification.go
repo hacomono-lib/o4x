@@ -79,9 +79,9 @@ func (s *NotificationService) SendNotification(ctx context.Context, req domain.S
 		return nil, fmt.Errorf("failed to marshal event: %w", err)
 	}
 
-	topic := fmt.Sprintf("notification.%s", notification.Type)
+	eventType := fmt.Sprintf("notification.%s", notification.Type)
 	if _, err := s.outboxRepo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
-		Topic:          topic,
+		EventType:      eventType,
 		Payload:        payload,
 		IdempotencyKey: notification.ID.String(),
 		MaxRetries:     3, // Lower retries for notifications

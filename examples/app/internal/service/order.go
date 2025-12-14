@@ -88,7 +88,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 	}
 
 	if _, err := s.outboxRepo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
-		Topic:          "order.created",
+		EventType:      "order.created",
 		Payload:        payload,
 		IdempotencyKey: order.ID.String(),
 		MaxRetries:     5,
@@ -146,7 +146,7 @@ func (s *OrderService) ConfirmOrder(ctx context.Context, orderID uuid.UUID) erro
 	}
 
 	if _, err := s.outboxRepo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
-		Topic:          "order.confirmed",
+		EventType:      "order.confirmed",
 		Payload:        payload,
 		IdempotencyKey: fmt.Sprintf("order-confirmed-%s", orderID),
 		MaxRetries:     5,

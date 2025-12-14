@@ -16,18 +16,18 @@ import (
 	"github.com/hacomono-lib/o4x/core"
 )
 
-// TopicQueueMapSuite tests TopicQueueMap implementation
-type TopicQueueMapSuite struct {
+// EventTypeQueueMapSuite tests EventTypeQueueMap implementation
+type EventTypeQueueMapSuite struct {
 	suite.Suite
 }
 
-func TestTopicQueueMapSuite(t *testing.T) {
-	suite.Run(t, new(TopicQueueMapSuite))
+func TestEventTypeQueueMapSuite(t *testing.T) {
+	suite.Run(t, new(EventTypeQueueMapSuite))
 }
 
-func (s *TopicQueueMapSuite) TestExactMatch_ReturnsRegisteredQueue() {
+func (s *EventTypeQueueMapSuite) TestExactMatch_ReturnsRegisteredQueue() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	m.Register("order.created", "order-queue")
 
 	// Act
@@ -37,9 +37,9 @@ func (s *TopicQueueMapSuite) TestExactMatch_ReturnsRegisteredQueue() {
 	assert.Equal(s.T(), "order-queue", result)
 }
 
-func (s *TopicQueueMapSuite) TestNoMatch_ReturnsDefaultQueue() {
+func (s *EventTypeQueueMapSuite) TestNoMatch_ReturnsDefaultQueue() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	m.Register("order.created", "order-queue")
 
 	// Act
@@ -49,9 +49,9 @@ func (s *TopicQueueMapSuite) TestNoMatch_ReturnsDefaultQueue() {
 	assert.Equal(s.T(), "default-queue", result)
 }
 
-func (s *TopicQueueMapSuite) TestPrefixMatch_ReturnsRegisteredQueue() {
+func (s *EventTypeQueueMapSuite) TestPrefixMatch_ReturnsRegisteredQueue() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	m.RegisterPrefix("order.", "order-queue")
 
 	// Act
@@ -61,9 +61,9 @@ func (s *TopicQueueMapSuite) TestPrefixMatch_ReturnsRegisteredQueue() {
 	assert.Equal(s.T(), "order-queue", result)
 }
 
-func (s *TopicQueueMapSuite) TestLongestPrefixMatch_TakesPriority() {
+func (s *EventTypeQueueMapSuite) TestLongestPrefixMatch_TakesPriority() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	m.RegisterPrefix("order.", "order-queue")
 	m.RegisterPrefix("order.payment.", "payment-queue")
 
@@ -76,9 +76,9 @@ func (s *TopicQueueMapSuite) TestLongestPrefixMatch_TakesPriority() {
 	assert.Equal(s.T(), "order-queue", resultOrder, "shorter prefix should match when no longer prefix exists")
 }
 
-func (s *TopicQueueMapSuite) TestExactMatchTakesPriorityOverPrefix() {
+func (s *EventTypeQueueMapSuite) TestExactMatchTakesPriorityOverPrefix() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	m.RegisterPrefix("order.", "order-queue")
 	m.Register("order.special", "special-queue")
 
@@ -91,9 +91,9 @@ func (s *TopicQueueMapSuite) TestExactMatchTakesPriorityOverPrefix() {
 	assert.Equal(s.T(), "order-queue", resultOther, "prefix should still work for other topics")
 }
 
-func (s *TopicQueueMapSuite) TestMultiplePrefixes_SortedByLengthDescending() {
+func (s *EventTypeQueueMapSuite) TestMultiplePrefixes_SortedByLengthDescending() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	// Register in non-sorted order
 	m.RegisterPrefix("a", "a-queue")
 	m.RegisterPrefix("abc", "abc-queue")
@@ -113,9 +113,9 @@ func (s *TopicQueueMapSuite) TestMultiplePrefixes_SortedByLengthDescending() {
 	assert.Equal(s.T(), "a-queue", resultA)
 }
 
-func (s *TopicQueueMapSuite) TestReRegisterPrefix_UpdatesQueue() {
+func (s *EventTypeQueueMapSuite) TestReRegisterPrefix_UpdatesQueue() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	m.RegisterPrefix("order.", "old-queue")
 	m.RegisterPrefix("order.", "new-queue")
 
@@ -126,9 +126,9 @@ func (s *TopicQueueMapSuite) TestReRegisterPrefix_UpdatesQueue() {
 	assert.Equal(s.T(), "new-queue", result, "re-registering should update the queue")
 }
 
-func (s *TopicQueueMapSuite) TestEmptyTopic_ReturnsDefaultQueue() {
+func (s *EventTypeQueueMapSuite) TestEmptyTopic_ReturnsDefaultQueue() {
 	// Arrange
-	m := NewTopicQueueMap("default-queue")
+	m := NewEventTypeQueueMap("default-queue")
 	m.RegisterPrefix("order.", "order-queue")
 
 	// Act
@@ -258,7 +258,7 @@ func (s *PublisherSuite) TestPublish_OversizedPayload_ReturnsPermanentError() {
 
 	msg := &core.Outbox{
 		ID:             "test-id",
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        oversizedPayload,
 		IdempotencyKey: "test-key",
 	}
@@ -277,7 +277,7 @@ func (s *PublisherSuite) TestPublish_FifoQueue_SetsGroupAndDeduplicationId() {
 	publisher := NewPublisher(s.mockClient, "https://sqs.../queue.fifo")
 	msg := &core.Outbox{
 		ID:             "test-id",
-		Topic:          "order.created",
+		EventType:      "order.created",
 		Payload:        []byte(`{"order_id":"123"}`),
 		IdempotencyKey: "order-123",
 	}
@@ -301,7 +301,7 @@ func (s *PublisherSuite) TestPublish_StandardQueue_DoesNotSetFifoFields() {
 	publisher := NewPublisher(s.mockClient, "https://sqs.../standard-queue")
 	msg := &core.Outbox{
 		ID:             "test-id",
-		Topic:          "order.created",
+		EventType:      "order.created",
 		Payload:        []byte(`{"order_id":"123"}`),
 		IdempotencyKey: "order-123",
 	}
@@ -339,9 +339,9 @@ func (s *BatchPublisherSuite) TestPublishBatch_PartialFailure_ReturnsCorrectResu
 	// Arrange
 	publisher := NewBatchPublisher(s.mockClient, "https://sqs.../queue.fifo")
 	msgs := []*core.Outbox{
-		{ID: "msg-1", Topic: "test.topic", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
-		{ID: "msg-2", Topic: "test.topic", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
-		{ID: "msg-3", Topic: "test.topic", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"},
+		{ID: "msg-1", EventType: "test.event", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
+		{ID: "msg-2", EventType: "test.event", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
+		{ID: "msg-3", EventType: "test.event", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"},
 	}
 
 	// Mock: msg-1 succeeds, msg-2 fails, msg-3 succeeds
@@ -373,9 +373,9 @@ func (s *BatchPublisherSuite) TestPublishBatch_OversizedMessages_MarkedAsPermane
 	publisher := NewBatchPublisher(s.mockClient, "https://sqs.../queue.fifo")
 	oversizedPayload := make([]byte, MaxSQSMessageSize+1)
 	msgs := []*core.Outbox{
-		{ID: "msg-1", Topic: "test.topic", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
-		{ID: "msg-2", Topic: "test.topic", Payload: oversizedPayload, IdempotencyKey: "key-2"}, // Oversized
-		{ID: "msg-3", Topic: "test.topic", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"},
+		{ID: "msg-1", EventType: "test.event", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
+		{ID: "msg-2", EventType: "test.event", Payload: oversizedPayload, IdempotencyKey: "key-2"}, // Oversized
+		{ID: "msg-3", EventType: "test.event", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"},
 	}
 
 	// Mock: Only msg-1 and msg-3 should be sent
@@ -405,8 +405,8 @@ func (s *BatchPublisherSuite) TestPublishBatch_EntireBatchFails_AllMarkedAsFaile
 	// Arrange
 	publisher := NewBatchPublisher(s.mockClient, "https://sqs.../queue.fifo")
 	msgs := []*core.Outbox{
-		{ID: "msg-1", Topic: "test.topic", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
-		{ID: "msg-2", Topic: "test.topic", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
+		{ID: "msg-1", EventType: "test.event", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
+		{ID: "msg-2", EventType: "test.event", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
 	}
 
 	// Mock: Entire batch fails
@@ -448,16 +448,16 @@ func (s *MultiBatchPublisherSuite) SetupTest() {
 
 func (s *MultiBatchPublisherSuite) TestPublishBatch_MultipleQueues_PublishesInParallel() {
 	// Arrange
-	router := NewTopicQueueMap("https://sqs.../default-queue")
+	router := NewEventTypeQueueMap("https://sqs.../default-queue")
 	router.Register("order.created", "https://sqs.../orders-queue.fifo")
 	router.Register("payment.completed", "https://sqs.../payments-queue.fifo")
 
 	publisher := NewMultiBatchPublisher(s.mockClient, router)
 
 	msgs := []*core.Outbox{
-		{ID: "msg-1", Topic: "order.created", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
-		{ID: "msg-2", Topic: "payment.completed", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
-		{ID: "msg-3", Topic: "notification.sent", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"}, // Default queue
+		{ID: "msg-1", EventType: "order.created", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
+		{ID: "msg-2", EventType: "payment.completed", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
+		{ID: "msg-3", EventType: "notification.sent", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"}, // Default queue
 	}
 
 	// Track concurrent calls
@@ -491,15 +491,15 @@ func (s *MultiBatchPublisherSuite) TestPublishBatch_MultipleQueues_PublishesInPa
 
 func (s *MultiBatchPublisherSuite) TestPublishBatch_SameQueue_BatchesTogether() {
 	// Arrange
-	router := NewTopicQueueMap("https://sqs.../default-queue")
+	router := NewEventTypeQueueMap("https://sqs.../default-queue")
 	router.RegisterPrefix("order.", "https://sqs.../orders-queue.fifo")
 
 	publisher := NewMultiBatchPublisher(s.mockClient, router)
 
 	msgs := []*core.Outbox{
-		{ID: "msg-1", Topic: "order.created", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
-		{ID: "msg-2", Topic: "order.updated", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
-		{ID: "msg-3", Topic: "order.cancelled", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"},
+		{ID: "msg-1", EventType: "order.created", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
+		{ID: "msg-2", EventType: "order.updated", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
+		{ID: "msg-3", EventType: "order.cancelled", Payload: []byte(`{"id":3}`), IdempotencyKey: "key-3"},
 	}
 
 	// Mock: Expect 1 batch call with 3 messages
@@ -527,15 +527,15 @@ func (s *MultiBatchPublisherSuite) TestPublishBatch_SameQueue_BatchesTogether() 
 
 func (s *MultiBatchPublisherSuite) TestPublishBatch_PartialFailureInOneQueue_OtherQueuesSucceed() {
 	// Arrange
-	router := NewTopicQueueMap("https://sqs.../default-queue")
+	router := NewEventTypeQueueMap("https://sqs.../default-queue")
 	router.Register("order.created", "https://sqs.../orders-queue")
 	router.Register("payment.completed", "https://sqs.../payments-queue")
 
 	publisher := NewMultiBatchPublisher(s.mockClient, router)
 
 	msgs := []*core.Outbox{
-		{ID: "msg-1", Topic: "order.created", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
-		{ID: "msg-2", Topic: "payment.completed", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
+		{ID: "msg-1", EventType: "order.created", Payload: []byte(`{"id":1}`), IdempotencyKey: "key-1"},
+		{ID: "msg-2", EventType: "payment.completed", Payload: []byte(`{"id":2}`), IdempotencyKey: "key-2"},
 	}
 
 	// Mock: orders-queue succeeds, payments-queue fails

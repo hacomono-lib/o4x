@@ -41,8 +41,8 @@ type OutboxRepository interface {
 	// GetByID retrieves an outbox message by ID
 	GetByID(ctx context.Context, id string) (*Outbox, error)
 
-	// GetByIdempotencyKey retrieves an outbox message by topic and idempotency key
-	GetByIdempotencyKey(ctx context.Context, topic, idempotencyKey string) (*Outbox, error)
+	// GetByIdempotencyKey retrieves an outbox message by event_type and idempotency key
+	GetByIdempotencyKey(ctx context.Context, eventType, idempotencyKey string) (*Outbox, error)
 }
 
 // BatchOutboxRepository extends OutboxRepository with batch operations

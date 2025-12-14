@@ -23,7 +23,7 @@ CREATE TYPE %s AS ENUM (
 
 CREATE TABLE %s (
   id               UUID PRIMARY KEY,
-  topic            TEXT NOT NULL,
+  event_type       TEXT NOT NULL,
   payload          JSONB NOT NULL,
   metadata         JSONB,
   idempotency_key  TEXT NOT NULL,
@@ -50,10 +50,10 @@ CREATE INDEX idx_%s_status_next_retry_at
   ON %s (status, next_retry_at)
   WHERE status = 'FAILED' AND next_retry_at IS NOT NULL;
 
--- Ensure idempotency per topic
+-- Ensure idempotency per event_type
 ALTER TABLE %s
-  ADD CONSTRAINT uq_%s_topic_idempotency
-    UNIQUE (topic, idempotency_key);
+  ADD CONSTRAINT uq_%s_event_type_idempotency
+    UNIQUE (event_type, idempotency_key);
 `, enumName, tableName, enumName, tableName, tableName, tableName, tableName, tableName, tableName)
 }
 
@@ -70,54 +70,49 @@ DROP TYPE IF EXISTS %s;
 // Purpose:
 //   - Idempotency Store: Ensures exactly-once message processing
 //   - Atomic duplicate detection via composite primary key
-//   - Simpler design than consumer_messages (2 statuses: PROCESSING, COMPLETED)
+//   - CRITICAL: Inbox is NOT a message broker - it only tracks "has this been COMPLETED?"
 //
-// Design Differences from consumer_messages:
-//   - Primary Key: (consumer_name, message_id) - Natural idempotency
-//   - Status: ENUM type (consistent with outbox_status pattern)
-//   - No outbox_id, receipt_handle, receive_count, etc.
-//   - Focus: Idempotency checking, not SQS state tracking
+// Design Philosophy:
+//   - Primary Key: (consumer_name, message_id) - Natural idempotency via INSERT conflict
+//   - NO status field: Only tracks completion via completed_at timestamp
+//   - NO locking: SQS visibility timeout handles concurrency control
+//   - NO retry logic: Broker handles redelivery
+//   - NO stuck detection: Use observability (logs/metrics) instead
+//
+// Semantic Model:
+//   - Record exists: Message has been COMPLETED (skip forever)
+//   - Record missing: Message not yet completed (proceed with processing)
 //
 // Usage:
 //
 //	// In consumer handler
 //	ok, err := inboxRepo.TryStart(ctx, "OrderHandler", msg.MessageID)
 //	if !ok {
-//	    return nil // Duplicate
+//	    return nil // Already completed, skip
 //	}
-//	// Process message...
+//	// Process message (idempotent logic)...
 //	inboxRepo.Complete(ctx, "OrderHandler", msg.MessageID)
 func ConsumerInboxDDL(tableName string) string {
-	enumName := tableName + "_status"
 	return fmt.Sprintf(`-- Consumer Inbox Schema (Transactional Inbox / Idempotency Store)
--- Purpose: Ensure exactly-once message processing semantics
+-- Purpose: Track COMPLETED messages only for exactly-once semantics
 -- Design: Composite PK (consumer_name, message_id) for atomic duplicate detection
--- 2 states: PROCESSING, COMPLETED
-
-CREATE TYPE %s AS ENUM (
-  'PROCESSING',  -- Message currently being processed
-  'COMPLETED'    -- Message successfully processed
-);
+-- Philosophy: Inbox is NOT a broker - it only answers "has this been completed?"
 
 CREATE TABLE %s (
   consumer_name    TEXT NOT NULL,
   message_id       TEXT NOT NULL,
-  status           %s NOT NULL DEFAULT 'PROCESSING',
-  received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  processed_at     TIMESTAMPTZ,
+  completed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (consumer_name, message_id)
 );
 
--- Index for cleanup queries (DELETE WHERE status = 'COMPLETED' AND received_at < ...)
-CREATE INDEX idx_%s_status_received_at
-  ON %s (status, received_at);
-`, enumName, tableName, enumName, tableName, tableName)
+-- Index for cleanup queries (DELETE WHERE completed_at < ...)
+CREATE INDEX idx_%s_completed_at
+  ON %s (completed_at);
+`, tableName, tableName, tableName)
 }
 
-// DropConsumerInboxDDL generates the DDL to drop the consumer_inbox table and its ENUM type.
+// DropConsumerInboxDDL generates the DDL to drop the consumer_inbox table.
 func DropConsumerInboxDDL(tableName string) string {
-	enumName := tableName + "_status"
 	return fmt.Sprintf(`DROP TABLE IF EXISTS %s;
-DROP TYPE IF EXISTS %s;
-`, tableName, enumName)
+`, tableName)
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/hacomono-lib/o4x/core"
@@ -16,52 +15,28 @@ import (
 //
 // Design Notes:
 //   - Primary Key: (consumer_name, message_id) provides natural idempotency
-//   - No separate UUID id needed - composite PK is sufficient
-//   - Status tracks lifecycle: PROCESSING -> COMPLETED
-//   - ReceivedAt: When TryStart was first called (immutable)
-//   - ProcessedAt: When Complete was called (NULL until COMPLETED)
+//   - No status field: existence = completed
+//   - CompletedAt: When TryStart was first called (immutable)
 //
 // Thread-Safety:
 //   - INSERT ON CONFLICT ensures atomic duplicate detection
-//   - No explicit locks needed at application level
+//   - No locks needed - SQS visibility timeout handles concurrency
 type consumerInboxModel struct {
-	ConsumerName string     `gorm:"primaryKey;type:varchar(255);not null"`
-	MessageID    string     `gorm:"primaryKey;type:varchar(255);not null"`
-	Status       string     `gorm:"type:varchar(20);not null;default:'PROCESSING'"`
-	ReceivedAt   time.Time  `gorm:"type:timestamptz;not null;default:now()"`
-	ProcessedAt  *time.Time `gorm:"type:timestamptz"`
+	ConsumerName string    `gorm:"primaryKey;column:consumer_name;type:varchar(255);not null"`
+	MessageID    string    `gorm:"primaryKey;column:message_id;type:varchar(255);not null"`
+	CompletedAt  time.Time `gorm:"column:completed_at;type:timestamptz;not null;default:now()"`
 }
 
 // InboxRepository implements core.InboxRepository and core.InboxCleaner for GORM.
-//
-// Transactional Inbox Pattern:
-//   - Ensures exactly-once message processing semantics
-//   - Uses PostgreSQL's ON CONFLICT for atomic idempotency checking
-//   - Safe for concurrent message processing
-//
-// Usage:
-//
-//	db, _ := gorm.Open(postgres.Open(dsn))
-//	inboxRepo := gorm.NewInboxRepository(db)
-//
-//	// In consumer handler
-//	ok, err := inboxRepo.TryStart(ctx, "OrderHandler", msg.MessageID)
-//	if !ok {
-//	    return nil // Duplicate message
-//	}
-//	// Process message...
-//	inboxRepo.Complete(ctx, "OrderHandler", msg.MessageID)
 type InboxRepository struct {
-	db                  *gorm.DB
-	tableName           string
-	stuckInboxThreshold time.Duration
+	db        *gorm.DB
+	tableName string
 }
 
 // NewInboxRepository creates a new GORM inbox repository.
 //
 // Options:
 //   - WithInboxTableName: Customize table name (default: "consumer_inbox")
-//   - WithStuckInboxThreshold: Set stuck message threshold (default: 2 minutes)
 //
 // Example:
 //
@@ -75,9 +50,8 @@ func NewInboxRepository(db *gorm.DB, opts ...Option) *InboxRepository {
 	}
 
 	return &InboxRepository{
-		db:                  db,
-		tableName:           cfg.InboxTableName,
-		stuckInboxThreshold: cfg.StuckInboxThreshold,
+		db:        db,
+		tableName: cfg.InboxTableName,
 	}
 }
 
@@ -89,7 +63,6 @@ func NewInboxRepository(db *gorm.DB, opts ...Option) *InboxRepository {
 //	tx := db.Begin()
 //	defer tx.Rollback()
 //
-//	// Check idempotency in transaction
 //	txRepo := repo.WithTx(tx)
 //	ok, _ := txRepo.TryStart(ctx, "OrderHandler", msg.MessageID)
 //	if !ok {
@@ -99,157 +72,97 @@ func NewInboxRepository(db *gorm.DB, opts ...Option) *InboxRepository {
 //	// Business logic
 //	tx.Create(&order)
 //
-//	// Mark as completed
-//	txRepo.Complete(ctx, "OrderHandler", msg.MessageID)
 //	tx.Commit()
 func (r *InboxRepository) WithTx(tx *gorm.DB) *InboxRepository {
 	return &InboxRepository{
-		db:                  tx,
-		tableName:           r.tableName,
-		stuckInboxThreshold: r.stuckInboxThreshold,
+		db:        tx,
+		tableName: r.tableName,
 	}
 }
 
-// TryStart attempts to mark a message as "PROCESSING" in the inbox.
+// TryStart checks if this message has already been processed.
 //
-// Implementation Strategy:
-//  1. Try INSERT first with ON CONFLICT DO NOTHING (optimistic path for new messages)
-//  2. If INSERT conflicts, check existing record status
+// Canonical Implementation:
+//
+//	SELECT EXISTS(
+//	    SELECT 1 FROM consumer_inbox
+//	    WHERE consumer_name = ? AND message_id = ?
+//	)
 //
 // Behavior:
-//   - First message: INSERT succeeds -> returns (true, nil)
-//   - Duplicate (COMPLETED): Returns (false, nil) - skip processing
-//   - Duplicate (PROCESSING): Returns (true, nil) - allow retry
+//   - Record NOT EXISTS: return true (proceed with processing)
+//   - Record EXISTS: return false (already completed, skip processing)
+//
+// No locking, no status checking, no retry logic.
+// SQS visibility timeout handles concurrency.
+// SQS redelivery handles retries.
 //
 // Returns:
 //   - (true, nil): Should proceed with processing
-//   - (false, nil): Already completed (duplicate message)
+//   - (false, nil): Already completed, skip processing
 //   - (false, error): Database error occurred
 func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID string) (bool, error) {
-	// Optimistic path: Try INSERT first (most messages are new)
+	var count int64
+
+	result := r.db.WithContext(ctx).
+		Table(r.tableName).
+		Where("consumer_name = ? AND message_id = ?", consumerName, messageID).
+		Count(&count)
+
+	if result.Error != nil {
+		return false, fmt.Errorf("failed to check inbox record: %w", result.Error)
+	}
+
+	// Return true if NOT exists (should proceed)
+	// Return false if exists (already completed, skip)
+	return count == 0, nil
+}
+
+// Complete records successful message processing.
+//
+// Canonical Implementation:
+//
+//	INSERT INTO consumer_inbox (consumer_name, message_id, completed_at)
+//	VALUES (?, ?, NOW())
+//	ON CONFLICT (consumer_name, message_id) DO NOTHING
+//
+// Behavior:
+//   - First call: INSERT succeeds, record created
+//   - Subsequent calls: INSERT conflicts, no-op (idempotent)
+//
+// This method should be called after successful message processing.
+// Idempotent design ensures safety even if multiple workers call it.
+//
+// Returns:
+//   - nil: Success (record inserted or already exists)
+//   - error: Database error occurred
+func (r *InboxRepository) Complete(ctx context.Context, consumerName, messageID string) error {
 	insertQuery := fmt.Sprintf(`
-		INSERT INTO %s (consumer_name, message_id, status, received_at)
-		VALUES (?, ?, 'PROCESSING', NOW())
+		INSERT INTO %s (consumer_name, message_id, completed_at)
+		VALUES (?, ?, NOW())
 		ON CONFLICT (consumer_name, message_id) DO NOTHING
 	`, r.tableName)
 
 	result := r.db.WithContext(ctx).Exec(insertQuery, consumerName, messageID)
 	if result.Error != nil {
-		return false, fmt.Errorf("failed to insert inbox record: %w", result.Error)
+		return fmt.Errorf("failed to insert inbox completion record: %w", result.Error)
 	}
 
-	// INSERT succeeded (1 row affected) - first time processing
-	if result.RowsAffected == 1 {
-		return true, nil
-	}
-
-	// INSERT conflicted (0 rows affected) - record already exists
-	// Check its status with exclusive lock to prevent concurrent processing
-	// Defense in depth: SQS visibility timeout is primary control, this is secondary
-	lockQuery := fmt.Sprintf(`
-		SELECT consumer_name, message_id, status, received_at, processed_at
-		FROM %s
-		WHERE consumer_name = ? AND message_id = ?
-		FOR UPDATE NOWAIT
-	`, r.tableName)
-
-	var existing consumerInboxModel
-	err := r.db.WithContext(ctx).Raw(lockQuery, consumerName, messageID).Scan(&existing).Error
-
-	// Lock acquired successfully
-	if err == nil {
-		// Check status
-		if existing.Status == string(core.InboxStatusCompleted) {
-			// Already completed - duplicate message
-			return false, nil
-		}
-
-		// PROCESSING state - check if stuck (crashed handler)
-		if existing.Status == string(core.InboxStatusProcessing) {
-			age := time.Since(existing.ReceivedAt)
-			if age > r.stuckInboxThreshold {
-				// Stuck message (handler likely crashed) - allow retry
-				// The lock ensures only one worker will retry at a time
-				return true, nil
-			}
-			// Recent PROCESSING - another worker is processing
-			// Reject to be safe (shouldn't happen with correct visibility timeout)
-			return false, nil
-		}
-
-		// Unknown status - allow processing
-		return true, nil
-	}
-
-	// Check for lock timeout error (concurrent processing)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
-		// Another worker is currently processing this message
-		// Return false to skip (the other worker will handle it)
-		return false, nil
-	}
-
-	// Check for context cancellation or deadline
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return false, nil
-	}
-
-	// Check for record not found (shouldn't happen, but handle gracefully)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// Race condition: record was deleted between INSERT and SELECT
-		// This is very rare but possible. Return false to skip.
-		return false, nil
-	}
-
-	// Unexpected error
-	return false, fmt.Errorf("failed to lock inbox record: %w", err)
-}
-
-// Complete marks a message as "COMPLETED" in the inbox.
-//
-// Implementation:
-//   - Updates status to "COMPLETED" and sets processed_at timestamp
-//   - If record doesn't exist, this is a no-op (returns nil)
-//   - Idempotent: calling multiple times has no additional effect
-//
-// Returns:
-//   - nil: Success (or record doesn't exist)
-//   - error: Database error occurred
-//
-// SQL Example:
-//
-//	UPDATE consumer_inbox
-//	SET status = 'COMPLETED', processed_at = NOW()
-//	WHERE consumer_name = 'OrderHandler' AND message_id = 'msg-123';
-func (r *InboxRepository) Complete(ctx context.Context, consumerName, messageID string) error {
-	result := r.db.WithContext(ctx).
-		Table(r.tableName).
-		Where("consumer_name = ? AND message_id = ?", consumerName, messageID).
-		Updates(map[string]interface{}{
-			"status":       string(core.InboxStatusCompleted),
-			"processed_at": gorm.Expr("NOW()"),
-		})
-
-	if result.Error != nil {
-		return fmt.Errorf("failed to update inbox record to completed: %w", result.Error)
-	}
-
-	// Note: We don't check RowsAffected here because Complete is idempotent
-	// If the record doesn't exist, that's fine (maybe it was cleaned up)
 	return nil
 }
 
 // GetByMessageID retrieves an inbox record by consumer name and message ID.
 //
 // Returns:
-//   - (*ConsumerInbox, nil): Record found
-//   - (nil, ErrNotFound): Record doesn't exist
+//   - (*ConsumerInbox, nil): Record found (message completed)
+//   - (nil, ErrNotFound): Record doesn't exist (message not yet completed)
 //   - (nil, error): Database error occurred
 func (r *InboxRepository) GetByMessageID(ctx context.Context, consumerName, messageID string) (*core.ConsumerInbox, error) {
 	var model consumerInboxModel
 
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
+		Select("consumer_name, message_id, completed_at").
 		Where("consumer_name = ? AND message_id = ?", consumerName, messageID).
 		First(&model)
 
@@ -263,33 +176,32 @@ func (r *InboxRepository) GetByMessageID(ctx context.Context, consumerName, mess
 	return r.modelToCore(&model), nil
 }
 
-// DeleteOlderThan deletes inbox records with the given status older than the specified duration.
+// DeleteOlderThan deletes inbox records older than the specified duration.
 //
 // Cleanup Recommendations:
-//   - COMPLETED messages: 7-30 days retention (for audit trail)
-//   - PROCESSING messages: Keep longer (30-90 days) for crash investigation
+//   - Retention: 7-30 days (for audit trail and debugging)
+//   - Run as scheduled job (daily or weekly)
 //
 // Returns the number of deleted records.
 //
 // Example:
 //
 //	// Daily cleanup job
-//	deleted, err := repo.DeleteOlderThan(ctx, core.InboxStatusCompleted, 7*24*time.Hour)
+//	deleted, err := repo.DeleteOlderThan(ctx, 7*24*time.Hour)
 //	log.Info("cleanup completed", "deleted", deleted)
 //
 // SQL Example (PostgreSQL):
 //
 //	DELETE FROM consumer_inbox
-//	WHERE status = 'COMPLETED'
-//	  AND received_at < NOW() - INTERVAL '7 days';
-func (r *InboxRepository) DeleteOlderThan(ctx context.Context, status core.InboxStatus, olderThan time.Duration) (int64, error) {
+//	WHERE completed_at < NOW() - INTERVAL '7 days';
+func (r *InboxRepository) DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error) {
 	// Convert Go duration to PostgreSQL interval format
 	// This ensures timezone consistency by using PostgreSQL's NOW() function
 	intervalStr := fmt.Sprintf("%d seconds", int64(olderThan.Seconds()))
 
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
-		Where("status = ? AND received_at < NOW() - ?::interval", string(status), intervalStr).
+		Where("completed_at < NOW() - ?::interval", intervalStr).
 		Delete(&consumerInboxModel{})
 
 	if result.Error != nil {
@@ -304,8 +216,6 @@ func (r *InboxRepository) modelToCore(m *consumerInboxModel) *core.ConsumerInbox
 	return &core.ConsumerInbox{
 		ConsumerName: m.ConsumerName,
 		MessageID:    m.MessageID,
-		Status:       core.InboxStatus(m.Status),
-		ReceivedAt:   m.ReceivedAt,
-		ProcessedAt:  m.ProcessedAt,
+		CompletedAt:  m.CompletedAt,
 	}
 }

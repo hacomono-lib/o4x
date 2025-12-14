@@ -20,12 +20,6 @@ type Config struct {
 	// are considered crashed and will be recovered to FAILED state by ReviveStuckPublishing.
 	// Default: 5 minutes.
 	StuckPublishingThreshold time.Duration
-	// StuckInboxThreshold is the time duration after which consumer inbox records stuck in PROCESSING state
-	// are considered crashed and will be allowed to retry by TryStart.
-	// Default: 2 minutes (typically 2-4x the SQS visibility timeout).
-	// This should be set to at least 2x your maximum handler processing time to prevent
-	// false positives during normal processing.
-	StuckInboxThreshold time.Duration
 }
 
 // Option is a function that modifies Config
@@ -39,7 +33,6 @@ func DefaultConfig() *Config {
 		RequeueBackoffBase:       1 * time.Second,
 		RequeueBackoffMax:        1 * time.Hour,
 		StuckPublishingThreshold: 5 * time.Minute,
-		StuckInboxThreshold:      2 * time.Minute,
 	}
 }
 
@@ -71,24 +64,6 @@ func WithInboxTableName(name string) Option {
 func WithStuckPublishingThreshold(threshold time.Duration) Option {
 	return func(c *Config) {
 		c.StuckPublishingThreshold = threshold
-	}
-}
-
-// WithStuckInboxThreshold sets the threshold for detecting stuck messages in consumer inbox PROCESSING state.
-// Messages that remain in PROCESSING state longer than this duration will be allowed to retry by TryStart.
-//
-// IMPORTANT: Set this to at least 2x your maximum handler processing time to prevent duplicate processing.
-//
-// Recommended values:
-//   - High throughput (1m): For fast handlers with 30s SQS visibility timeout
-//   - Balanced (2m): Default, suitable for most use cases (30s visibility timeout)
-//   - Long processing (5-10m): For handlers with long-running operations
-//
-// Formula: StuckInboxThreshold >= 2 * (maximum handler processing time)
-// Example: If handler can take up to 60s, set this to at least 120s (2 minutes)
-func WithStuckInboxThreshold(threshold time.Duration) Option {
-	return func(c *Config) {
-		c.StuckInboxThreshold = threshold
 	}
 }
 

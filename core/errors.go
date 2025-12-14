@@ -137,13 +137,13 @@ func (e *TransientError) IsRetryable() bool {
 
 // PublishError wraps a publish failure with additional context
 type PublishError struct {
-	OutboxID string
-	Topic    string
-	Cause    error
+	OutboxID  string
+	EventType string
+	Cause     error
 }
 
 func (e *PublishError) Error() string {
-	return fmt.Sprintf("publish error for outbox %s topic %s: %v", e.OutboxID, e.Topic, e.Cause)
+	return fmt.Sprintf("publish error for outbox %s event_type %s: %v", e.OutboxID, e.EventType, e.Cause)
 }
 
 func (e *PublishError) Unwrap() error {

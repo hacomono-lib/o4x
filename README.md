@@ -90,7 +90,7 @@ stateDiagram-v2
 
 **Operational actions:**
 - **FAILED**: Usually auto-recovers via RequeueFailed. Check `error_message` for network/auth issues. Reset retry count if needed: `UPDATE outbox SET retry_count = 0 WHERE id = '...'`
-- **DEAD**: Alert immediately. Query cause: `SELECT id, topic, error_message, payload FROM outbox WHERE status = 'DEAD'`. Options: (1) Fix payload and re-enqueue, (2) Manual publish to SQS, (3) Archive/delete if invalid. See CLAUDE.md for detailed recovery procedures.
+- **DEAD**: Alert immediately. Query cause: `SELECT id, event_type, error_message, payload FROM outbox WHERE status = 'DEAD'`. Options: (1) Fix payload and re-enqueue, (2) Manual publish to SQS, (3) Archive/delete if invalid. See CLAUDE.md for detailed recovery procedures.
 
 ### 2. Consumer (SQS-specific, Optional)
 
@@ -191,7 +191,7 @@ if _, err := tx.Exec(ctx, "INSERT INTO users (id, name) VALUES ($1, $2)", userID
 
 // Insert message to outbox within the same transaction
 if _, err := repo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
-    Topic:          "user.created",
+    EventType:      "user.created",
     Payload:        json.RawMessage(`{"user_id": "123"}`),
     IdempotencyKey: "user-123-created",
     MaxRetries:     10,
@@ -279,7 +279,7 @@ import (
 
 // Create handler (see "Handler Patterns" section for more options)
 handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
-    log.Printf("Received: topic=%s, body=%s", msg.Topic, msg.Body)
+    log.Printf("Received: event_type=%s, body=%s", msg.EventType, msg.Body)
     return nil
 })
 
@@ -306,19 +306,19 @@ o4x provides several ways to define message handlers.
 
 ```go
 handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
-    log.Printf("topic=%s body=%s", msg.Topic, string(msg.Body))
+    log.Printf("event_type=%s body=%s", msg.EventType, string(msg.Body))
     return nil
 })
 ```
 
-### Topic Router
+### Event Type Router
 
-Route messages to different handlers based on topic. TopicRouter provides three registration methods:
+Route messages to different handlers based on event type. EventTypeRouter provides two registration methods:
 
 ```go
-router := consumer.NewTopicRouter()
+router := consumer.NewEventTypeRouter()
 
-// 1. RegisterFunc - Register inline handler functions for specific topics
+// 1. RegisterFunc - Register inline handler functions for specific event types
 router.RegisterFunc("order.created", func(ctx context.Context, msg *consumer.SQSMessage) error {
     // Handle order.created events
     return nil
@@ -341,20 +341,9 @@ func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) err
 
 router.Register("order.shipped", &OrderHandler{db: db})
 
-// 3. RegisterPrefix - Match topic prefixes (checked after exact matches)
-router.RegisterPrefix("notification.", consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
-    // Handles: notification.email, notification.sms, notification.push, etc.
-    return nil
-}))
-
-router.RegisterPrefix("log.", consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
-    // Handles: log.access, log.error, log.audit, etc.
-    return nil
-}))
-
-// 4. SetFallback - Handle unknown topics (optional but recommended)
+// 3. SetFallback - Handle unknown event types (optional but recommended)
 router.SetFallback(consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
-    log.Printf("unhandled topic: %s", msg.Topic)
+    log.Printf("unhandled event_type: %s", msg.EventType)
     return nil  // Return nil to acknowledge, error to retry
 }))
 
@@ -363,10 +352,9 @@ svc := consumer.NewService(sqsClient, router, config)
 ```
 
 **Routing Priority:**
-1. Exact topic matches via `Register`/`RegisterFunc` (highest priority)
-2. Prefix matches via `RegisterPrefix` (checked in registration order)
-3. Fallback handler via `SetFallback` (lowest priority)
-4. If no match and no fallback: error returned, message retried
+1. Exact event type matches via `Register`/`RegisterFunc` (highest priority)
+2. Fallback handler via `SetFallback` (lowest priority)
+3. If no match and no fallback: error returned, message retried
 
 ### Typed Handler (Generics)
 
@@ -386,7 +374,7 @@ orderHandler := consumer.NewTypedHandler(func(ctx context.Context, msg *consumer
 })
 
 // Register with router
-router := consumer.NewTopicRouter()
+router := consumer.NewEventTypeRouter()
 router.Register("order.created", orderHandler)
 ```
 
@@ -403,7 +391,7 @@ type MyHandler struct {
 
 func (h *MyHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
     // Access injected dependencies
-    h.logger.Info("processing message", "topic", msg.Topic)
+    h.logger.Info("processing message", "event_type", msg.EventType)
 
     // Implement idempotency check
     if h.cache.Exists(ctx, msg.IdempotencyKey).Val() {
@@ -622,20 +610,12 @@ func StartCleanupScheduler(ctx context.Context) {
 ```go
 inboxRepo := pgx.NewInboxRepository(pool)
 
-// Delete COMPLETED messages older than 7 days
-completedCount, err := inboxRepo.DeleteOlderThan(ctx, core.InboxStatusCompleted, 7*24*time.Hour)
+// Delete completed inbox messages older than 7 days
+completedCount, err := inboxRepo.DeleteOlderThan(ctx, 7*24*time.Hour)
 if err != nil {
-    return fmt.Errorf("failed to delete COMPLETED inbox messages: %w", err)
+    return fmt.Errorf("failed to delete inbox messages: %w", err)
 }
-log.Printf("Deleted %d COMPLETED inbox messages", completedCount)
-
-// Delete stuck PROCESSING messages older than 30 days
-// These are messages where handler crashed during processing
-processingCount, err := inboxRepo.DeleteOlderThan(ctx, core.InboxStatusProcessing, 30*24*time.Hour)
-if err != nil {
-    return fmt.Errorf("failed to delete PROCESSING inbox messages: %w", err)
-}
-log.Printf("Deleted %d stuck PROCESSING inbox messages", processingCount)
+log.Printf("Deleted %d inbox messages", completedCount)
 ```
 
 #### Monitoring Cleanup
@@ -772,7 +752,7 @@ publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue")
 publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue.fifo")
 ```
 
-- ✅ Ordering guarantee (per MessageGroupId = topic)
+- ✅ Ordering guarantee (per MessageGroupId = event_type)
 - ✅ Deduplication (5-minute window via MessageDeduplicationId = idempotency_key)
 - ❌ Lower throughput (300 msg/sec per queue, 3,000 with high throughput mode)
 - ❌ Higher cost ($0.50 per million requests)
@@ -822,11 +802,11 @@ For advanced use cases, route topics to different queues. TopicQueueMap provides
 ```go
 import "github.com/hacomono-lib/o4x/contrib/sqs"
 
-// Create topic-to-queue router with a default queue (Standard or FIFO)
+// Create event-type-to-queue router with a default queue (Standard or FIFO)
 // TopicQueueMap is thread-safe and can be registered concurrently
 router := sqs.NewTopicQueueMap("https://sqs.../default-queue") // Standard
 
-// 1. Register - Exact topic match (highest priority)
+// 1. Register - Exact event type match (highest priority)
 router.Register("order.created", "https://sqs.../orders-queue.fifo")
 router.Register("order.updated", "https://sqs.../orders-queue.fifo")
 router.Register("payment.completed", "https://sqs.../payments-queue.fifo")
@@ -845,17 +825,17 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, config)
 ```
 
 **Routing Priority:**
-1. Exact topic match via `Register()` (highest priority)
+1. Exact event type match via `Register()` (highest priority)
 2. Prefix match via `RegisterPrefix()` (checked in registration order)
 3. Default queue (specified in `NewTopicQueueMap`)
 
 **Thread Safety**: `TopicQueueMap` is safe for concurrent use. You can call `Register()`, `RegisterPrefix()`, and `QueueURL()` from multiple goroutines without external synchronization.
 
 **When to use multiple queues:**
-- Different topics have different ordering requirements (FIFO vs Standard)
-- Different topics have different throughput requirements
-- Different teams own different topic consumers
-- Topics need different retry policies (VisibilityTimeout, MaxRetries)
+- Different event types have different ordering requirements (FIFO vs Standard)
+- Different event types have different throughput requirements
+- Different teams own different event type consumers
+- Event types need different retry policies (VisibilityTimeout, MaxRetries)
 - Isolation between critical and non-critical events
 
 **Example routing strategy:**
@@ -871,7 +851,7 @@ Implement `TopicQueueRouter` for dynamic routing (e.g., from database or config 
 
 ```go
 type TopicQueueRouter interface {
-    QueueURL(topic string) string
+    QueueURL(eventType string) string
 }
 ```
 
@@ -888,21 +868,21 @@ import "github.com/hacomono-lib/o4x/core"
 
 hooks := &core.Hooks{
     OnPublishStart: func(ctx context.Context, msg *core.Outbox) {
-        metrics.IncrCounter("outbox.publish.start", "topic", msg.Topic)
+        metrics.IncrCounter("outbox.publish.start", "event_type", msg.EventType)
     },
     OnPublishSuccess: func(ctx context.Context, msg *core.Outbox, duration time.Duration) {
-        metrics.RecordLatency("outbox.publish.latency", duration, "topic", msg.Topic)
-        metrics.IncrCounter("outbox.publish.success", "topic", msg.Topic)
+        metrics.RecordLatency("outbox.publish.latency", duration, "event_type", msg.EventType)
+        metrics.IncrCounter("outbox.publish.success", "event_type", msg.EventType)
     },
     OnPublishFailure: func(ctx context.Context, msg *core.Outbox, err error, duration time.Duration, retryable bool) {
-        metrics.IncrCounter("outbox.publish.failure", "topic", msg.Topic, "retryable", retryable)
+        metrics.IncrCounter("outbox.publish.failure", "event_type", msg.EventType, "retryable", retryable)
         if !retryable {
             // Alert on permanent failures
             alerting.Send("Permanent publish failure", msg)
         }
     },
     OnMessageDead: func(ctx context.Context, msg *core.Outbox, err error) {
-        metrics.IncrCounter("outbox.message.dead", "topic", msg.Topic)
+        metrics.IncrCounter("outbox.message.dead", "event_type", msg.EventType)
         // Alert ops team, log to monitoring system, etc.
     },
 }
@@ -930,25 +910,25 @@ import "github.com/hacomono-lib/o4x/contrib/sqs/consumer"
 
 hooks := &consumer.Hooks{
     OnConsumeStart: func(ctx context.Context, msg *consumer.SQSMessage) {
-        metrics.IncrCounter("consumer.start", "topic", msg.Topic)
+        metrics.IncrCounter("consumer.start", "event_type", msg.EventType)
     },
     OnConsumeSuccess: func(ctx context.Context, msg *consumer.SQSMessage, duration time.Duration) {
-        metrics.RecordLatency("consumer.latency", duration, "topic", msg.Topic)
-        metrics.IncrCounter("consumer.success", "topic", msg.Topic)
+        metrics.RecordLatency("consumer.latency", duration, "event_type", msg.EventType)
+        metrics.IncrCounter("consumer.success", "event_type", msg.EventType)
     },
     OnConsumeFailure: func(ctx context.Context, msg *consumer.SQSMessage, err error, duration time.Duration, retryable bool) {
-        metrics.IncrCounter("consumer.failure", "topic", msg.Topic, "retryable", retryable)
+        metrics.IncrCounter("consumer.failure", "event_type", msg.EventType, "retryable", retryable)
         if !retryable {
             alerting.Send("Message reached max retries", msg)
         }
     },
     OnMessageDead: func(ctx context.Context, msg *consumer.SQSMessage, err error) {
-        metrics.IncrCounter("consumer.message.dead", "topic", msg.Topic)
+        metrics.IncrCounter("consumer.message.dead", "event_type", msg.EventType)
         // Alert ops team, log to dead letter monitoring, etc.
     },
     OnDeleteFailure: func(ctx context.Context, msg *consumer.SQSMessage, err error) {
         // Critical: message will be redelivered causing duplicate processing
-        metrics.IncrCounter("consumer.delete.failure", "topic", msg.Topic)
+        metrics.IncrCounter("consumer.delete.failure", "event_type", msg.EventType)
         alerting.Send("SQS delete failed - duplicate processing likely", msg)
     },
 }
@@ -1110,7 +1090,7 @@ hooks := &core.Hooks{
         var count int
         db.QueryRow("SELECT COUNT(*) FROM published_messages WHERE outbox_id = $1", msg.ID).Scan(&count)
         if count > 1 {
-            metrics.IncrCounter("outbox.duplicates", "topic", msg.Topic)
+            metrics.IncrCounter("outbox.duplicates", "event_type", msg.EventType)
         }
     },
 }

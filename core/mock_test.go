@@ -20,7 +20,7 @@ type MockOutboxRepository struct {
 	UpdateToDeadFunc               func(ctx context.Context, id string, errMsg string) error
 	RequeueFailedFunc              func(ctx context.Context) (int64, error)
 	GetByIDFunc                    func(ctx context.Context, id string) (*Outbox, error)
-	GetByIdempotencyKeyFunc        func(ctx context.Context, topic, idempotencyKey string) (*Outbox, error)
+	GetByIdempotencyKeyFunc        func(ctx context.Context, eventType, idempotencyKey string) (*Outbox, error)
 	ReviveStuckPublishingFunc      func(ctx context.Context) (int64, error)
 	FetchLockAndMarkPublishingFunc func(ctx context.Context, limit int) ([]*Outbox, error)
 	UpdateBatchToPublishedFunc     func(ctx context.Context, ids []string) (int64, error)
@@ -62,7 +62,7 @@ func (m *MockOutboxRepository) Insert(ctx context.Context, params OutboxInsertPa
 	}
 	msg := &Outbox{
 		ID:             GenerateID(),
-		Topic:          params.Topic,
+		EventType:      params.EventType,
 		Payload:        params.Payload,
 		IdempotencyKey: params.IdempotencyKey,
 		Status:         OutboxStatusEnqueued,
@@ -166,14 +166,14 @@ func (m *MockOutboxRepository) GetByID(ctx context.Context, id string) (*Outbox,
 	return nil, ErrNotFound
 }
 
-func (m *MockOutboxRepository) GetByIdempotencyKey(ctx context.Context, topic, idempotencyKey string) (*Outbox, error) {
+func (m *MockOutboxRepository) GetByIdempotencyKey(ctx context.Context, eventType, idempotencyKey string) (*Outbox, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.GetByIdempotencyKeyFunc != nil {
-		return m.GetByIdempotencyKeyFunc(ctx, topic, idempotencyKey)
+		return m.GetByIdempotencyKeyFunc(ctx, eventType, idempotencyKey)
 	}
 	for _, msg := range m.messages {
-		if msg.Topic == topic && msg.IdempotencyKey == idempotencyKey {
+		if msg.EventType == eventType && msg.IdempotencyKey == idempotencyKey {
 			return msg, nil
 		}
 	}
@@ -306,11 +306,11 @@ func (m *MockPublisher) MaxBatchSize() int {
 }
 
 // Helper functions for tests
-func createTestOutbox(topic string, payload interface{}) *Outbox {
+func createTestOutbox(eventType string, payload interface{}) *Outbox {
 	data, _ := json.Marshal(payload)
 	return &Outbox{
 		ID:             GenerateID(),
-		Topic:          topic,
+		EventType:      eventType,
 		Payload:        data,
 		IdempotencyKey: GenerateID(),
 		Status:         OutboxStatusEnqueued,
@@ -320,8 +320,8 @@ func createTestOutbox(topic string, payload interface{}) *Outbox {
 	}
 }
 
-func createTestOutboxWithRetry(topic string, payload interface{}, retryCount, maxRetries int) *Outbox {
-	msg := createTestOutbox(topic, payload)
+func createTestOutboxWithRetry(eventType string, payload interface{}, retryCount, maxRetries int) *Outbox {
+	msg := createTestOutbox(eventType, payload)
 	msg.RetryCount = retryCount
 	msg.MaxRetries = maxRetries
 	return msg

@@ -34,7 +34,7 @@ func (s *SchemaSuite) TestOutboxDDL_GeneratesCorrectSchema() {
 	// Check table creation
 	assert.Contains(s.T(), ddl, "CREATE TABLE outbox")
 	assert.Contains(s.T(), ddl, "id               UUID PRIMARY KEY")
-	assert.Contains(s.T(), ddl, "topic            TEXT NOT NULL")
+	assert.Contains(s.T(), ddl, "event_type       TEXT NOT NULL")
 	assert.Contains(s.T(), ddl, "payload          JSONB NOT NULL")
 	assert.Contains(s.T(), ddl, "metadata         JSONB")
 	assert.Contains(s.T(), ddl, "idempotency_key  TEXT NOT NULL")
@@ -50,8 +50,8 @@ func (s *SchemaSuite) TestOutboxDDL_GeneratesCorrectSchema() {
 	assert.Contains(s.T(), ddl, "ON outbox (status, created_at)")
 
 	// Check unique constraint
-	assert.Contains(s.T(), ddl, "ADD CONSTRAINT uq_outbox_topic_idempotency")
-	assert.Contains(s.T(), ddl, "UNIQUE (topic, idempotency_key)")
+	assert.Contains(s.T(), ddl, "ADD CONSTRAINT uq_outbox_event_type_idempotency")
+	assert.Contains(s.T(), ddl, "UNIQUE (event_type, idempotency_key)")
 }
 
 func (s *SchemaSuite) TestOutboxDDL_WithCustomTableName() {
@@ -66,7 +66,7 @@ func (s *SchemaSuite) TestOutboxDDL_WithCustomTableName() {
 	assert.Contains(s.T(), ddl, "CREATE TABLE custom_outbox")
 	assert.Contains(s.T(), ddl, "status           custom_outbox_status NOT NULL")
 	assert.Contains(s.T(), ddl, "idx_custom_outbox_status_created_at")
-	assert.Contains(s.T(), ddl, "uq_custom_outbox_topic_idempotency")
+	assert.Contains(s.T(), ddl, "uq_custom_outbox_event_type_idempotency")
 }
 
 func (s *SchemaSuite) TestDropOutboxDDL_GeneratesCorrectStatements() {

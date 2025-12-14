@@ -7,7 +7,7 @@ import "context"
 type Publisher interface {
 	// Publish sends a message to the message queue
 	// For SQS FIFO:
-	//   - MessageGroupId = topic
+	//   - MessageGroupId = event_type
 	//   - MessageDeduplicationId = idempotencyKey
 	Publish(ctx context.Context, msg *Outbox) error
 }

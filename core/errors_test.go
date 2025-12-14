@@ -106,9 +106,9 @@ func (s *PublishErrorSuite) TestWithRetryableCause_IsRetryable() {
 	// Arrange
 	cause := errors.New("network timeout")
 	err := &PublishError{
-		OutboxID: "test-id",
-		Topic:    "test-topic",
-		Cause:    cause,
+		OutboxID:  "test-id",
+		EventType: "test-topic",
+		Cause:     cause,
 	}
 
 	// Act
@@ -122,9 +122,9 @@ func (s *PublishErrorSuite) TestWithRetryableCause_UnwrapReturnsCause() {
 	// Arrange
 	cause := errors.New("network timeout")
 	err := &PublishError{
-		OutboxID: "test-id",
-		Topic:    "test-topic",
-		Cause:    cause,
+		OutboxID:  "test-id",
+		EventType: "test-topic",
+		Cause:     cause,
 	}
 
 	// Act & Assert
@@ -135,9 +135,9 @@ func (s *PublishErrorSuite) TestWithPermanentCause_IsNotRetryable() {
 	// Arrange
 	cause := NewPermanentError(errors.New("validation failed"))
 	err := &PublishError{
-		OutboxID: "test-id",
-		Topic:    "test-topic",
-		Cause:    cause,
+		OutboxID:  "test-id",
+		EventType: "test-topic",
+		Cause:     cause,
 	}
 
 	// Act

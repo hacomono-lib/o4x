@@ -50,7 +50,7 @@ func (h *Hooks) callOnPublishStart(ctx context.Context, msg *Outbox) {
 					"hook", "OnPublishStart",
 					"panic", r,
 					"outbox_id", msg.ID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()
@@ -68,7 +68,7 @@ func (h *Hooks) callOnPublishSuccess(ctx context.Context, msg *Outbox, duration 
 					"hook", "OnPublishSuccess",
 					"panic", r,
 					"outbox_id", msg.ID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()
@@ -86,7 +86,7 @@ func (h *Hooks) callOnPublishFailure(ctx context.Context, msg *Outbox, err error
 					"hook", "OnPublishFailure",
 					"panic", r,
 					"outbox_id", msg.ID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()
@@ -104,7 +104,7 @@ func (h *Hooks) callOnMessageDead(ctx context.Context, msg *Outbox, err error) {
 					"hook", "OnMessageDead",
 					"panic", r,
 					"outbox_id", msg.ID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()

@@ -11,7 +11,7 @@ CREATE TYPE outbox_status AS ENUM (
 
 CREATE TABLE outbox (
   id               UUID PRIMARY KEY,
-  topic            TEXT NOT NULL,
+  event_type       TEXT NOT NULL,
   payload          JSONB NOT NULL,
   metadata         JSONB,
   idempotency_key  TEXT NOT NULL,
@@ -38,30 +38,23 @@ CREATE INDEX idx_outbox_status_next_retry_at
   ON outbox (status, next_retry_at)
   WHERE status = 'FAILED' AND next_retry_at IS NOT NULL;
 
--- Ensure idempotency per topic
+-- Ensure idempotency per event_type
 ALTER TABLE outbox
-  ADD CONSTRAINT uq_outbox_topic_idempotency
-    UNIQUE (topic, idempotency_key);
+  ADD CONSTRAINT uq_outbox_event_type_idempotency
+    UNIQUE (event_type, idempotency_key);
 
 -- Consumer Inbox Schema (Transactional Inbox / Idempotency Store)
--- Purpose: Ensure exactly-once message processing semantics
+-- Purpose: Track COMPLETED messages only for exactly-once semantics
 -- Design: Composite PK (consumer_name, message_id) for atomic duplicate detection
--- 2 states: PROCESSING, COMPLETED
-
-CREATE TYPE consumer_inbox_status AS ENUM (
-  'PROCESSING',  -- Message currently being processed
-  'COMPLETED'    -- Message successfully processed
-);
+-- Philosophy: Inbox is NOT a broker - it only answers "has this been completed?"
 
 CREATE TABLE consumer_inbox (
   consumer_name    TEXT NOT NULL,
   message_id       TEXT NOT NULL,
-  status           consumer_inbox_status NOT NULL DEFAULT 'PROCESSING',
-  received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  processed_at     TIMESTAMPTZ,
+  completed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (consumer_name, message_id)
 );
 
--- Index for cleanup queries (DELETE WHERE status = 'COMPLETED' AND received_at < ...)
-CREATE INDEX idx_consumer_inbox_status_received_at
-  ON consumer_inbox (status, received_at);
+-- Index for cleanup queries (DELETE WHERE completed_at < ...)
+CREATE INDEX idx_consumer_inbox_completed_at
+  ON consumer_inbox (completed_at);

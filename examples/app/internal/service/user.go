@@ -74,7 +74,7 @@ func (s *UserService) RegisterUser(ctx context.Context, req domain.CreateUserReq
 	}
 
 	if _, err := s.outboxRepo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
-		Topic:          "user.registered",
+		EventType:      "user.registered",
 		Payload:        payload,
 		IdempotencyKey: user.ID.String(),
 		MaxRetries:     5,
@@ -121,7 +121,7 @@ func (s *UserService) UpdateUser(ctx context.Context, userID uuid.UUID, req doma
 	}
 
 	if _, err := s.outboxRepo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
-		Topic:          "user.updated",
+		EventType:      "user.updated",
 		Payload:        payload,
 		IdempotencyKey: fmt.Sprintf("user-updated-%s-%d", userID, time.Now().UnixNano()),
 		MaxRetries:     5,

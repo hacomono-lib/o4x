@@ -181,8 +181,8 @@ func TestService_MessageProcessing(t *testing.T) {
 	mockHandler := &mockHandler{}
 
 	// Add test messages
-	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{"data":"value"}}`)
-	mockClient.addMessage("msg-2", `{"topic":"test.event","payload":{"data":"value2"}}`)
+	mockClient.addMessage("msg-1", `{"event_type":"test.event","payload":{"data":"value"}}`)
+	mockClient.addMessage("msg-2", `{"event_type":"test.event","payload":{"data":"value2"}}`)
 
 	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
 	cfg.WorkerCount = 1
@@ -228,8 +228,8 @@ func TestService_ErrorHandling(t *testing.T) {
 		},
 	}
 
-	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{}}`)
-	mockClient.addMessage("msg-2", `{"topic":"test.event","payload":{}}`)
+	mockClient.addMessage("msg-1", `{"event_type":"test.event","payload":{}}`)
+	mockClient.addMessage("msg-2", `{"event_type":"test.event","payload":{}}`)
 
 	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
 	cfg.WorkerCount = 1
@@ -284,7 +284,7 @@ func TestService_MessageConcurrency(t *testing.T) {
 
 	// Add multiple messages
 	for i := 0; i < 10; i++ {
-		mockClient.addMessage(fmt.Sprintf("msg-%d", i), `{"topic":"test.event","payload":{}}`)
+		mockClient.addMessage(fmt.Sprintf("msg-%d", i), `{"event_type":"test.event","payload":{}}`)
 	}
 
 	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
@@ -328,7 +328,7 @@ func TestService_GracefulShutdown(t *testing.T) {
 		},
 	}
 
-	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{}}`)
+	mockClient.addMessage("msg-1", `{"event_type":"test.event","payload":{}}`)
 
 	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
 	cfg.ShutdownTimeout = 2 * time.Second
@@ -405,7 +405,7 @@ func TestService_IsStale(t *testing.T) {
 	mockClient := &mockSQSClient{}
 	mockHandler := &mockHandler{}
 
-	mockClient.addMessage("msg-1", `{"topic":"test.event","payload":{}}`)
+	mockClient.addMessage("msg-1", `{"event_type":"test.event","payload":{}}`)
 
 	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
 	service := consumer.NewService(mockClient, mockHandler, cfg)

@@ -24,78 +24,78 @@ func (f HandlerFunc) Handle(ctx context.Context, msg *SQSMessage) error {
 	return f(ctx, msg)
 }
 
-// ErrUnknownTopic is returned when a message has an unknown topic and no fallback is set
-var ErrUnknownTopic = fmt.Errorf("unknown topic")
+// ErrUnknownEventType is returned when a message has an unknown event_type and no fallback is set
+var ErrUnknownEventType = fmt.Errorf("unknown event_type")
 
-// UnknownTopicBehavior defines how to handle messages with unknown topics
-type UnknownTopicBehavior int
+// UnknownEventTypeBehavior defines how to handle messages with unknown event types
+type UnknownEventTypeBehavior int
 
 const (
-	// UnknownTopicError returns an error for unknown topics (default, recommended)
-	UnknownTopicError UnknownTopicBehavior = iota
-	// UnknownTopicIgnore silently ignores unknown topics (use with caution)
-	UnknownTopicIgnore
+	// UnknownEventTypeError returns an error for unknown event types (default, recommended)
+	UnknownEventTypeError UnknownEventTypeBehavior = iota
+	// UnknownEventTypeIgnore silently ignores unknown event types (use with caution)
+	UnknownEventTypeIgnore
 )
 
-// TopicRouter routes messages to handlers based on topic
-type TopicRouter struct {
-	handlers             map[string]Handler
-	fallback             Handler
-	unknownTopicBehavior UnknownTopicBehavior
+// EventTypeRouter routes messages to handlers based on event_type
+type EventTypeRouter struct {
+	handlers                 map[string]Handler
+	fallback                 Handler
+	unknownEventTypeBehavior UnknownEventTypeBehavior
 }
 
-// NewTopicRouter creates a new TopicRouter.
-// By default, unknown topics return an error. Use SetUnknownTopicBehavior to change this.
-func NewTopicRouter() *TopicRouter {
-	return &TopicRouter{
-		handlers:             make(map[string]Handler),
-		unknownTopicBehavior: UnknownTopicError,
+// NewEventTypeRouter creates a new EventTypeRouter.
+// By default, unknown event types return an error. Use SetUnknownEventTypeBehavior to change this.
+func NewEventTypeRouter() *EventTypeRouter {
+	return &EventTypeRouter{
+		handlers:                 make(map[string]Handler),
+		unknownEventTypeBehavior: UnknownEventTypeError,
 	}
 }
 
-// Register registers a handler for a specific topic
-func (r *TopicRouter) Register(topic string, handler Handler) {
-	r.handlers[topic] = handler
+// Register registers a handler for a specific event_type
+func (r *EventTypeRouter) Register(eventType string, handler Handler) {
+	r.handlers[eventType] = handler
 }
 
-// RegisterFunc registers a handler function for a specific topic
-func (r *TopicRouter) RegisterFunc(topic string, fn HandlerFunc) {
-	r.handlers[topic] = fn
+// RegisterFunc registers a handler function for a specific event_type
+func (r *EventTypeRouter) RegisterFunc(eventType string, fn HandlerFunc) {
+	r.handlers[eventType] = fn
 }
 
-// SetFallback sets the fallback handler for unknown topics
-func (r *TopicRouter) SetFallback(handler Handler) {
+// SetFallback sets the fallback handler for unknown event types
+func (r *EventTypeRouter) SetFallback(handler Handler) {
 	r.fallback = handler
 }
 
-// SetUnknownTopicBehavior sets how to handle messages with unknown topics when no fallback is set.
-// Default is UnknownTopicError which returns an error.
-func (r *TopicRouter) SetUnknownTopicBehavior(behavior UnknownTopicBehavior) {
-	r.unknownTopicBehavior = behavior
+// SetUnknownEventTypeBehavior sets how to handle messages with unknown event types when no fallback is set.
+// Default is UnknownEventTypeError which returns an error.
+func (r *EventTypeRouter) SetUnknownEventTypeBehavior(behavior UnknownEventTypeBehavior) {
+	r.unknownEventTypeBehavior = behavior
 }
 
-// Topics returns the list of registered topics
-func (r *TopicRouter) Topics() []string {
-	topics := make([]string, 0, len(r.handlers))
-	for topic := range r.handlers {
-		topics = append(topics, topic)
+// EventTypes returns the list of registered event types
+func (r *EventTypeRouter) EventTypes() []string {
+	eventTypes := make([]string, 0, len(r.handlers))
+	for eventType := range r.handlers {
+		eventTypes = append(eventTypes, eventType)
 	}
-	return topics
+	return eventTypes
 }
 
 // Handle routes the message to the appropriate handler
-func (r *TopicRouter) Handle(ctx context.Context, msg *SQSMessage) error {
-	handler, ok := r.handlers[msg.Topic]
+func (r *EventTypeRouter) Handle(ctx context.Context, msg *SQSMessage) error {
+	handler, ok := r.handlers[msg.EventType]
 	if !ok {
 		if r.fallback != nil {
 			return r.fallback.Handle(ctx, msg)
 		}
 		// No handler found and no fallback
-		switch r.unknownTopicBehavior {
-		case UnknownTopicIgnore:
+		switch r.unknownEventTypeBehavior {
+		case UnknownEventTypeIgnore:
 			return nil
 		default:
-			return fmt.Errorf("%w: %s", ErrUnknownTopic, msg.Topic)
+			return fmt.Errorf("%w: %s", ErrUnknownEventType, msg.EventType)
 		}
 	}
 	return handler.Handle(ctx, msg)

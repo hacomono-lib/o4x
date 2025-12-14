@@ -16,7 +16,7 @@ import (
 // outboxModel is the GORM model for outbox table
 type outboxModel struct {
 	ID             string     `gorm:"primaryKey;type:uuid"`
-	Topic          string     `gorm:"type:varchar(255);not null"`
+	EventType      string     `gorm:"type:varchar(255);not null"`
 	Payload        []byte     `gorm:"type:jsonb;not null"`
 	Metadata       []byte     `gorm:"type:jsonb"`
 	IdempotencyKey string     `gorm:"type:varchar(255);not null"`
@@ -88,7 +88,7 @@ func (r *OutboxRepository) Insert(ctx context.Context, params core.OutboxInsertP
 
 	model := &outboxModel{
 		ID:             id,
-		Topic:          params.Topic,
+		EventType:      params.EventType,
 		Payload:        params.Payload,
 		Metadata:       params.Metadata,
 		IdempotencyKey: params.IdempotencyKey,
@@ -128,7 +128,7 @@ func (r *OutboxRepository) FetchAndLockToPublishing(ctx context.Context) (*core.
 			SET status = 'PUBLISHING', updated_at = NOW()
 			FROM locked
 			WHERE ` + r.tableName + `.id = locked.id
-			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.topic, ` + r.tableName + `.payload,
+			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.event_type, ` + r.tableName + `.payload,
 			          ` + r.tableName + `.metadata, ` + r.tableName + `.idempotency_key, ` + r.tableName + `.status,
 			          ` + r.tableName + `.error_message, ` + r.tableName + `.retry_count,
 			          ` + r.tableName + `.max_retries, ` + r.tableName + `.created_at, ` + r.tableName + `.updated_at
@@ -256,13 +256,13 @@ func (r *OutboxRepository) GetByID(ctx context.Context, id string) (*core.Outbox
 	return r.modelToCore(&model), nil
 }
 
-// GetByIdempotencyKey retrieves an outbox message by topic and idempotency key
-func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, topic, idempotencyKey string) (*core.Outbox, error) {
+// GetByIdempotencyKey retrieves an outbox message by event_type and idempotency key
+func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, eventType, idempotencyKey string) (*core.Outbox, error) {
 	var model outboxModel
 
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
-		Where("topic = ? AND idempotency_key = ?", topic, idempotencyKey).
+		Where("event_type = ? AND idempotency_key = ?", eventType, idempotencyKey).
 		First(&model)
 
 	if result.Error != nil {
@@ -276,12 +276,12 @@ func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, topic, idemp
 }
 
 // InsertOutboxJSON is a helper to insert with a Go struct as payload
-func (r *OutboxRepository) InsertOutboxJSON(ctx context.Context, topic string, payload any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
-	return r.InsertOutboxJSONWithMetadata(ctx, topic, payload, nil, idempotencyKey, maxRetries)
+func (r *OutboxRepository) InsertOutboxJSON(ctx context.Context, eventType string, payload any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
+	return r.InsertOutboxJSONWithMetadata(ctx, eventType, payload, nil, idempotencyKey, maxRetries)
 }
 
 // InsertOutboxJSONWithMetadata is a helper to insert with a Go struct as payload and optional metadata
-func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, topic string, payload, metadata any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
+func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eventType string, payload, metadata any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -296,7 +296,7 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, top
 	}
 
 	return r.Insert(ctx, core.OutboxInsertParams{
-		Topic:          topic,
+		EventType:      eventType,
 		Payload:        data,
 		Metadata:       metadataBytes,
 		IdempotencyKey: idempotencyKey,
@@ -336,7 +336,7 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 func (r *OutboxRepository) modelToCore(m *outboxModel) *core.Outbox {
 	return &core.Outbox{
 		ID:             m.ID,
-		Topic:          m.Topic,
+		EventType:      m.EventType,
 		Payload:        m.Payload,
 		Metadata:       m.Metadata,
 		IdempotencyKey: m.IdempotencyKey,
@@ -369,7 +369,7 @@ func (r *OutboxRepository) FetchLockAndMarkPublishing(ctx context.Context, limit
 			SET status = 'PUBLISHING', updated_at = NOW()
 			FROM locked
 			WHERE ` + r.tableName + `.id = locked.id
-			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.topic, ` + r.tableName + `.payload,
+			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.event_type, ` + r.tableName + `.payload,
 			          ` + r.tableName + `.metadata, ` + r.tableName + `.idempotency_key, ` + r.tableName + `.status,
 			          ` + r.tableName + `.error_message, ` + r.tableName + `.retry_count,
 			          ` + r.tableName + `.max_retries, ` + r.tableName + `.created_at, ` + r.tableName + `.updated_at

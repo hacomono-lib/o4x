@@ -1,32 +1,32 @@
 package consumer
 
-// TopicRouterRegistry manages multiple TopicRouters by group
-type TopicRouterRegistry struct {
-	routers map[string]*TopicRouter
+// EventTypeRouterRegistry manages multiple EventTypeRouters by group
+type EventTypeRouterRegistry struct {
+	routers map[string]*EventTypeRouter
 }
 
-// NewTopicRouterRegistry creates a new TopicRouterRegistry
-func NewTopicRouterRegistry() *TopicRouterRegistry {
-	return &TopicRouterRegistry{
-		routers: make(map[string]*TopicRouter),
+// NewEventTypeRouterRegistry creates a new EventTypeRouterRegistry
+func NewEventTypeRouterRegistry() *EventTypeRouterRegistry {
+	return &EventTypeRouterRegistry{
+		routers: make(map[string]*EventTypeRouter),
 	}
 }
 
-// RegisterGroup creates a new TopicRouter for the given group and calls the setup function
-func (r *TopicRouterRegistry) RegisterGroup(group string, setup func(*TopicRouter)) {
-	router := NewTopicRouter()
+// RegisterGroup creates a new EventTypeRouter for the given group and calls the setup function
+func (r *EventTypeRouterRegistry) RegisterGroup(group string, setup func(*EventTypeRouter)) {
+	router := NewEventTypeRouter()
 	setup(router)
 	r.routers[group] = router
 }
 
 // GetRouter returns the router for the given group
-func (r *TopicRouterRegistry) GetRouter(group string) (*TopicRouter, bool) {
+func (r *EventTypeRouterRegistry) GetRouter(group string) (*EventTypeRouter, bool) {
 	router, ok := r.routers[group]
 	return router, ok
 }
 
 // ValidGroups returns all registered group names
-func (r *TopicRouterRegistry) ValidGroups() []string {
+func (r *EventTypeRouterRegistry) ValidGroups() []string {
 	groups := make([]string, 0, len(r.routers))
 	for group := range r.routers {
 		groups = append(groups, group)

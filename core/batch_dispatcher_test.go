@@ -174,7 +174,7 @@ func (s *BatchDispatcherSuite) TestStartAndStop_IsRunningReflectsState() {
 func (s *BatchDispatcherSuite) TestBatchDispatcher_ProcessesBatchOfMessages() {
 	// Arrange
 	for i := 0; i < 5; i++ {
-		msg := createTestOutbox("test.topic", map[string]int{"index": i})
+		msg := createTestOutbox("test.event", map[string]int{"index": i})
 		s.repo.AddMessage(msg)
 	}
 
@@ -205,7 +205,7 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_HandlesPartialBatchFailure() 
 	// Arrange
 	msgs := make([]*Outbox, 3)
 	for i := 0; i < 3; i++ {
-		msgs[i] = createTestOutbox("test.topic", map[string]int{"index": i})
+		msgs[i] = createTestOutbox("test.event", map[string]int{"index": i})
 		s.repo.AddMessage(msgs[i])
 	}
 
@@ -262,7 +262,7 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_HandlesPartialBatchFailure() 
 
 func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadAfterMaxRetries() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.topic", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishBatchFunc = func(ctx context.Context, batch []*Outbox) []PublishResult {
@@ -303,7 +303,7 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadAfterMaxRetri
 
 func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnPermanentError() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishBatchFunc = func(ctx context.Context, batch []*Outbox) []PublishResult {
@@ -345,7 +345,7 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnPermanentEr
 func (s *BatchDispatcherSuite) TestBatchDispatcher_CallsBatchHooks() {
 	// Arrange
 	for i := 0; i < 3; i++ {
-		msg := createTestOutbox("test.topic", map[string]int{"index": i})
+		msg := createTestOutbox("test.event", map[string]int{"index": i})
 		s.repo.AddMessage(msg)
 	}
 

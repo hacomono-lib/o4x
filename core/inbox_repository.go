@@ -2,133 +2,140 @@ package core
 
 import (
 	"context"
-	"errors"
 	"time"
 )
 
-// ErrDuplicateMessage indicates the message has already been processed (idempotency violation)
-var ErrDuplicateMessage = errors.New("duplicate message: already processed or in progress")
-
 // InboxRepository defines the interface for Transactional Inbox (Idempotency Store).
-// This is the recommended approach for ensuring exactly-once processing semantics
-// in event-driven systems using the Inbox pattern.
 //
-// IMPORTANT - Scope and Use Cases:
-//   - ✅ RECOMMENDED: Handlers with DB operations only (within transaction)
-//   - ✅ SUPPORTED: Handlers with external API calls (if API supports idempotency keys)
-//   - ❌ NOT RECOMMENDED: Handlers with non-idempotent external APIs
+// CRITICAL DESIGN PRINCIPLES:
+//   - Inbox is NOT a message broker
+//   - Inbox does NOT manage retries (SQS handles that)
+//   - Inbox does NOT track in-flight processing (SQS visibility timeout handles that)
+//   - Inbox ONLY answers: "Has this message been COMPLETED by this consumer?"
 //
-// TryStart() behavior (correctly handles retries):
-//  1. Record doesn't exist → INSERT → returns true (first time)
-//  2. Record exists with status=processing → returns true (retry scenario)
-//  3. Record exists with status=completed → returns false (duplicate)
+// Semantic Model:
+//   - Record exists: Message COMPLETED (skip forever)
+//   - Record missing: Message not yet completed (proceed)
 //
-// For external API calls with idempotency key support:
-//   - Pass message_id as idempotency key to the API
-//   - Example:
-//     ok, _ := inboxRepo.TryStart(ctx, "EmailHandler", msg.MessageID)
-//     if !ok { return nil }
-//     err := emailClient.Send(email, idempotencyKey: msg.MessageID)
-//     if err != nil { return err } // Retry safe - API handles duplicates
-//     inboxRepo.Complete(ctx, "EmailHandler", msg.MessageID)
+// Why This Design:
+//   - SQS is point-to-point (1 message → 1 queue → 1 consumer)
+//   - SQS visibility timeout prevents concurrent processing
+//   - SQS redelivery handles retries
+//   - Database should not duplicate broker responsibilities
 //
-// For non-idempotent external APIs:
-//   - Use application-level idempotency instead
-//   - message_id column in business data + ON CONFLICT DO NOTHING
-//   - Redis cache with TTL for deduplication
-//
-// Purpose:
-//   - Prevent duplicate message processing at the storage level
-//   - Provide atomic "check-and-lock" semantics for idempotency
-//   - Track message processing lifecycle (processing -> completed)
+// Use Cases:
+//   - ✅ RECOMMENDED: Handlers with DB operations (within transaction)
+//   - ✅ RECOMMENDED: Handlers with external API calls (if API supports idempotency keys)
+//   - ❌ NEVER: Handlers with non-idempotent external APIs (don't use async messaging)
 //
 // Design:
 //   - Primary key: (consumer_name, message_id)
-//   - consumer_name: Identifies the handler/service processing the message
-//   - message_id: Unique message identifier (e.g., SQS message ID)
-//   - status: "processing" or "completed"
+//   - consumer_name: Identifies the handler/service
+//   - message_id: SQS message ID
+//   - completed_at: When Complete() was called (NOT NULL)
 //
-// Usage Pattern (DB operations only):
+// Usage Pattern (Transaction):
 //
-//	// In your consumer handler - DB OPERATIONS ONLY
 //	tx := h.db.Begin()
 //	defer tx.Rollback()
 //
 //	txInbox := h.inboxRepo.WithTx(tx)
 //	ok, err := txInbox.TryStart(ctx, "OrderHandler", msg.MessageID)
-//	if err != nil {
-//	    return err
-//	}
-//	if !ok {
-//	    return nil // Duplicate
-//	}
+//	if err != nil { return err }
+//	if !ok { return nil } // Already completed
 //
-//	// DB operations (no external API calls!)
-//	if err := tx.Create(&order).Error; err != nil {
-//	    return err // tx.Rollback() called, inbox record rolled back
-//	}
+//	// DB operations
+//	tx.Create(&order)
 //
-//	// Mark as completed
-//	if err := txInbox.Complete(ctx, "OrderHandler", msg.MessageID); err != nil {
-//	    return err
-//	}
+//	// Mark completed
+//	txInbox.Complete(ctx, "OrderHandler", msg.MessageID)
+//	tx.Commit()
 //
-//	return tx.Commit().Error
+// Usage Pattern (Auto-commit for idempotent logic):
+//
+//	ok, err := h.inboxRepo.TryStart(ctx, "EmailHandler", msg.MessageID)
+//	if err != nil { return err }
+//	if !ok { return nil } // Already completed
+//
+//	// Idempotent operation (ON CONFLICT DO NOTHING, etc.)
+//	h.db.Exec("INSERT INTO emails ... ON CONFLICT DO NOTHING")
+//
+//	// Mark completed
+//	h.inboxRepo.Complete(ctx, "EmailHandler", msg.MessageID)
 //
 // Thread-Safety:
-//   - TryStart uses INSERT ... ON CONFLICT (or equivalent) for atomic check-and-insert
-//   - Race-safe: concurrent calls for same message_id will return false for duplicates
-//   - No explicit locking required at application level
+//   - TryStart uses optimistic INSERT with ON CONFLICT DO NOTHING
+//   - No locking required (SQS visibility timeout is primary control)
+//   - Atomic at database level via composite primary key
 //
 // Storage Implementations:
+//   - contrib/pgx: PostgreSQL using pgx
 //   - contrib/gorm: PostgreSQL/MySQL using GORM
-//   - contrib/pgx: PostgreSQL using pgx (planned)
-//   - Custom: Redis, in-memory, or any other storage backend
 type InboxRepository interface {
-	// TryStart attempts to mark a message as "processing" in the inbox.
+	// TryStart checks if a message has already been completed.
 	//
-	// This method provides atomic "check-and-insert" semantics to ensure
-	// that each message is processed exactly once, even under concurrent conditions.
+	// Implementation:
+	//   SELECT EXISTS(
+	//       SELECT 1 FROM consumer_inbox
+	//       WHERE consumer_name = ? AND message_id = ?
+	//   )
 	//
 	// Returns:
-	//   - (true, nil): Message successfully marked as processing (first time)
-	//   - (false, nil): Message already exists (duplicate, safe to skip)
-	//   - (false, error): Storage error occurred
+	//   - (true, nil): Message not yet completed, proceed with processing
+	//   - (false, nil): Already completed, skip processing
+	//   - (false, error): Database error occurred
 	//
-	// Atomicity:
-	//   - Must use INSERT ... ON CONFLICT DO NOTHING (or equivalent)
-	//   - Concurrent calls for same (consumer_name, message_id) must be serialized
-	//   - Only one caller should receive (true, nil)
+	// CRITICAL: This is a lightweight existence check only.
+	// Multiple workers may pass this check simultaneously.
+	// Use Complete() after successful processing to record completion.
 	//
-	// Example:
-	//   ok, err := repo.TryStart(ctx, "EmailHandler", "msg-123")
-	//   if err != nil {
-	//       return fmt.Errorf("inbox check failed: %w", err)
-	//   }
-	//   if !ok {
-	//       log.Info("duplicate message detected, skipping")
-	//       return nil
-	//   }
-	//   // Proceed with message processing...
+	// Design Rationale:
+	//   - DB-only handlers: Use within transaction for consistency
+	//   - External API handlers: API must support idempotency keys
+	//
+	// Example (DB-only):
+	//   tx := db.Begin()
+	//   txInbox := repo.WithTx(tx)
+	//   ok, _ := txInbox.TryStart(ctx, "OrderHandler", msg.MessageID)
+	//   if !ok { tx.Rollback(); return nil }
+	//   // Business logic...
+	//   txInbox.Complete(ctx, "OrderHandler", msg.MessageID)
+	//   tx.Commit()
+	//
+	// Example (External API):
+	//   ok, _ := repo.TryStart(ctx, "PaymentHandler", msg.MessageID)
+	//   if !ok { return nil }
+	//   // API call with idempotency key (multiple workers may reach here)
+	//   err := api.Charge(orderID, amount, msg.MessageID)
+	//   if err != nil { return err }
+	//   repo.Complete(ctx, "PaymentHandler", msg.MessageID)
 	TryStart(ctx context.Context, consumerName, messageID string) (bool, error)
 
-	// Complete marks a message as "completed" in the inbox.
+	// Complete records that a message has been successfully processed.
 	//
-	// This should be called after successful message processing.
-	// If the message doesn't exist, this is a no-op (idempotent).
-	//
-	// Parameters:
-	//   - consumerName: The name of the consumer/handler
-	//   - messageID: The unique message identifier
+	// Implementation:
+	//   INSERT INTO consumer_inbox (consumer_name, message_id, completed_at)
+	//   VALUES (?, ?, NOW())
+	//   ON CONFLICT (consumer_name, message_id) DO NOTHING
 	//
 	// Returns:
-	//   - nil: Success (or message doesn't exist)
-	//   - error: Storage error occurred
+	//   - nil: Successfully recorded or already exists (idempotent)
+	//   - error: Database error occurred
 	//
-	// Example:
-	//   if err := repo.Complete(ctx, "EmailHandler", "msg-123"); err != nil {
-	//       return fmt.Errorf("failed to mark message as completed: %w", err)
-	//   }
+	// CRITICAL: Always call this after successful processing.
+	// ON CONFLICT DO NOTHING ensures multiple workers can safely call this.
+	//
+	// Example (DB-only):
+	//   tx := db.Begin()
+	//   txInbox := repo.WithTx(tx)
+	//   // ... business logic ...
+	//   txInbox.Complete(ctx, "OrderHandler", msg.MessageID)
+	//   tx.Commit()
+	//
+	// Example (External API):
+	//   err := api.Charge(orderID, amount, msg.MessageID)
+	//   if err != nil { return err }
+	//   repo.Complete(ctx, "PaymentHandler", msg.MessageID) // Safe even if concurrent
 	Complete(ctx context.Context, consumerName, messageID string) error
 
 	// GetByMessageID retrieves an inbox record by consumer name and message ID.
@@ -139,49 +146,27 @@ type InboxRepository interface {
 // InboxCleaner provides methods to clean up old inbox records.
 // Implement this interface to prevent unbounded table growth.
 type InboxCleaner interface {
-	// DeleteOlderThan deletes inbox records with the given status
-	// that are older than the specified duration.
+	// DeleteOlderThan deletes inbox records older than the specified duration.
 	//
 	// Recommendation:
-	//   - Completed messages: 7-30 days retention (for audit trail)
-	//   - Processing messages: Keep longer (30-90 days) for crash investigation
+	//   - Retention: 7-30 days (for audit trail and debugging)
+	//   - Run as scheduled job (daily or weekly)
 	//
 	// Returns the number of deleted records.
 	//
 	// Example:
-	//   // Delete completed messages older than 7 days
-	//   deleted, err := repo.DeleteOlderThan(ctx, InboxStatusCompleted, 7*24*time.Hour)
-	//   if err != nil {
-	//       log.Error("cleanup failed", "error", err)
-	//   } else {
-	//       log.Info("cleanup completed", "deleted", deleted)
-	//   }
-	DeleteOlderThan(ctx context.Context, status InboxStatus, olderThan time.Duration) (int64, error)
+	//   // Delete messages older than 7 days
+	//   deleted, err := repo.DeleteOlderThan(ctx, 7*24*time.Hour)
+	//   log.Info("cleanup completed", "deleted", deleted)
+	DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
-// InboxStatus represents the processing state of a message in the inbox
-type InboxStatus string
-
-const (
-	// InboxStatusProcessing indicates the message is currently being processed
-	InboxStatusProcessing InboxStatus = "PROCESSING"
-
-	// InboxStatusCompleted indicates the message has been successfully processed
-	InboxStatusCompleted InboxStatus = "COMPLETED"
-)
-
-// String returns the string representation of InboxStatus
-func (s InboxStatus) String() string {
-	return string(s)
-}
-
-// ConsumerInbox represents a record in the consumer_inbox table
+// ConsumerInbox represents a record in the consumer_inbox table.
+// A record's existence means the message has been completed.
 type ConsumerInbox struct {
 	ConsumerName string
 	MessageID    string
-	Status       InboxStatus
-	ReceivedAt   time.Time
-	ProcessedAt  *time.Time
+	CompletedAt  time.Time
 }
 
 // NopInboxRepository is a no-op implementation of InboxRepository.
@@ -216,6 +201,6 @@ func (r *NopInboxRepository) GetByMessageID(ctx context.Context, consumerName, m
 }
 
 // DeleteOlderThan always returns 0 deleted records.
-func (r *NopInboxRepository) DeleteOlderThan(ctx context.Context, status InboxStatus, olderThan time.Duration) (int64, error) {
+func (r *NopInboxRepository) DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error) {
 	return 0, nil
 }

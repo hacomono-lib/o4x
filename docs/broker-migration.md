@@ -501,7 +501,7 @@ _, err = db.Exec(`
     CREATE TABLE outbox_kafka (
         -- Same schema as outbox_sqs
         id UUID PRIMARY KEY,
-        topic TEXT NOT NULL,
+        event_type TEXT NOT NULL,
         payload JSONB NOT NULL,
         idempotency_key TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL,
@@ -764,23 +764,23 @@ GROUP BY broker;
 **5. Topic Migration Progress**
 
 ```sql
--- Track which topics are on which broker
+-- Track which event types are on which broker
 SELECT
-    topic,
+    event_type,
     COUNT(*) AS message_count,
     'SQS' AS broker
 FROM outbox_sqs
 WHERE created_at > NOW() - INTERVAL '1 hour'
-GROUP BY topic
+GROUP BY event_type
 UNION ALL
 SELECT
-    topic,
+    event_type,
     COUNT(*) AS message_count,
     'Kafka' AS broker
 FROM outbox_kafka
 WHERE created_at > NOW() - INTERVAL '1 hour'
-GROUP BY topic
-ORDER BY topic, broker;
+GROUP BY event_type
+ORDER BY event_type, broker;
 ```
 
 ### Grafana Dashboard Example
@@ -911,7 +911,7 @@ kafka-topics --bootstrap-server localhost:9092 --describe --topic order.created
 
 ```sql
 -- Find stuck messages
-SELECT id, topic, status, created_at, updated_at
+SELECT id, event_type, status, created_at, updated_at
 FROM outbox_sqs
 WHERE status = 'PUBLISHING'
   AND updated_at < NOW() - INTERVAL '5 minutes'

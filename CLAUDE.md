@@ -109,7 +109,12 @@ repo := pgx.NewOutboxRepository(pool)
 tx, _ := pool.Begin(ctx)
 defer tx.Rollback(ctx)
 tx.Exec(ctx, "INSERT INTO orders ...") // Business logic
-repo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{...}) // Outbox in same tx
+repo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
+    EventType: "order.created",
+    Payload: payload,
+    IdempotencyKey: "order-123",
+    MaxRetries: 10,
+}) // Outbox in same tx
 tx.Commit(ctx)
 ```
 
@@ -152,11 +157,11 @@ inboxRepo := pgx.NewInboxRepository(pool)
   - `Publisher` / `BatchPublisher` - Single queue
   - `MultiQueuePublisher` / `MultiBatchPublisher` - Topic-based routing
   - `TopicQueueMap` - Thread-safe routing with sync.RWMutex
-  - FIFO: `MessageGroupId` = topic, `MessageDeduplicationId` = idempotency_key
+  - FIFO: `MessageGroupId` = event_type, `MessageDeduplicationId` = idempotency_key
   - Standard: Higher throughput, no ordering, handler must be idempotent
 
 - **contrib/sqs/consumer/**: SQS message consumer (optional)
-  - `Handler` interface with `TopicRouter` and `TypedHandler[T]` helpers
+  - `Handler` interface with `EventTypeRouter` and `TypedHandler[T]` helpers
   - Handler must be idempotent (use `InboxRepository` or application-level idempotency)
   - **Point to Point design**: 1 Queue → 1 Consumer Service
 
@@ -167,7 +172,7 @@ inboxRepo := pgx.NewInboxRepository(pool)
 ### Database Tables
 
 **Outbox Table** (Publisher side):
-- `id` (UUID v7), `topic`, `payload` (JSONB), `metadata` (JSONB), `idempotency_key`
+- `id` (UUID v7), `event_type`, `payload` (JSONB), `metadata` (JSONB), `idempotency_key`
 - `status` (ENUM), `error_message`, `retry_count`, `max_retries`
 - `next_retry_at` (TIMESTAMPTZ), `created_at`, `updated_at`
 - Indexes: `idx_outbox_status_created_at`, `idx_outbox_status_next_retry_at`
@@ -195,12 +200,12 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 
 **Standard Queue**: Higher throughput, lower cost, no ordering, possible duplicates. Use for: notifications, logs, analytics.
 
-**FIFO Queue (*.fifo)**: Ordering guarantee (per topic), 5-min deduplication, lower throughput, higher cost. Use for: state transitions, inventory, payments.
+**FIFO Queue (*.fifo)**: Ordering guarantee (per event_type), 5-min deduplication, lower throughput, higher cost. Use for: state transitions, inventory, payments.
 
 **Decision**: Need ordered processing of same entity? YES → FIFO, NO → Standard
 
 **Message Ordering:**
-- FIFO: Messages with same MessageGroupId (= topic) delivered in order
+- FIFO: Messages with same MessageGroupId (= event_type) delivered in order
 - Multi-Queue FIFO: Each queue has independent ordering
 - Standard: Best-effort only, use timestamps if ordering needed
 
@@ -209,17 +214,17 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 - Standard: No SQS deduplication, handler MUST be idempotent
 - Both: Application handlers must be idempotent for at-least-once delivery
 
-### Topic-based Routing vs Fan-Out
+### Event-Type-based Routing vs Fan-Out
 
-**Critical Distinction**: `TopicRouter` is for **Topic-based Routing**, NOT Fan-Out.
+**Critical Distinction**: `EventTypeRouter` is for **Event-Type-based Routing**, NOT Fan-Out.
 
-- **Topic-based Routing**: Different event types → different handlers (1 topic → 1 handler)
+- **Event-Type-based Routing**: Different event types → different handlers (1 event_type → 1 handler)
 - **Fan-Out**: Same event → multiple handlers (1 message → N handlers)
 
 **SQS Constraint**: Point-to-Point delivery (1 message → 1 consumer only). **Fan-Out is impossible** within a single SQS queue.
 
 **Rule of Thumb**:
-- Different events → Use `TopicRouter` with 1 SQS queue
+- Different events → Use `EventTypeRouter` with 1 SQS queue
 - Same event, multiple handlers → Use SNS + multiple SQS queues OR Kinesis/Kafka
 
 → **For detailed examples and architecture diagrams**, see [README.md Multiple Queues section](README.md#multiple-queues-topic-based-routing)

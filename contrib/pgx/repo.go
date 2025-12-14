@@ -19,9 +19,9 @@ import (
 // %s placeholder is used for table name (validated during repository initialization)
 const (
 	queryInsert = `
-		INSERT INTO %s (id, topic, payload, metadata, idempotency_key, status, max_retries)
+		INSERT INTO %s (id, event_type, payload, metadata, idempotency_key, status, max_retries)
 		VALUES ($1, $2, $3, $4, $5, 'ENQUEUED', $6)
-		RETURNING id, topic, payload, metadata, idempotency_key, status, error_message,
+		RETURNING id, event_type, payload, metadata, idempotency_key, status, error_message,
 		          retry_count, max_retries, created_at, updated_at`
 
 	queryFetchAndLockToPublishing = `
@@ -37,7 +37,7 @@ const (
 			SET status = 'PUBLISHING', updated_at = now()
 			FROM locked
 			WHERE %s.id = locked.id
-			RETURNING %s.id, %s.topic, %s.payload, %s.metadata, %s.idempotency_key,
+			RETURNING %s.id, %s.event_type, %s.payload, %s.metadata, %s.idempotency_key,
 			          %s.status, %s.error_message, %s.retry_count,
 			          %s.max_retries, %s.created_at, %s.updated_at
 		)
@@ -78,16 +78,16 @@ const (
 		  AND next_retry_at <= now()`
 
 	queryGetByID = `
-		SELECT id, topic, payload, metadata, idempotency_key, status, error_message,
+		SELECT id, event_type, payload, metadata, idempotency_key, status, error_message,
 		       retry_count, max_retries, next_retry_at, created_at, updated_at
 		FROM %s
 		WHERE id = $1`
 
 	queryGetByIdempotencyKey = `
-		SELECT id, topic, payload, metadata, idempotency_key, status, error_message,
+		SELECT id, event_type, payload, metadata, idempotency_key, status, error_message,
 		       retry_count, max_retries, next_retry_at, created_at, updated_at
 		FROM %s
-		WHERE topic = $1 AND idempotency_key = $2`
+		WHERE event_type = $1 AND idempotency_key = $2`
 
 	queryReviveStuckPublishing = `
 		UPDATE %s
@@ -117,7 +117,7 @@ const (
 			SET status = 'PUBLISHING', updated_at = now()
 			FROM locked
 			WHERE %s.id = locked.id
-			RETURNING %s.id, %s.topic, %s.payload, %s.metadata, %s.idempotency_key,
+			RETURNING %s.id, %s.event_type, %s.payload, %s.metadata, %s.idempotency_key,
 			          %s.status, %s.error_message, %s.retry_count,
 			          %s.max_retries, %s.created_at, %s.updated_at
 		)
@@ -207,14 +207,14 @@ func (r *OutboxRepository) Insert(ctx context.Context, params core.OutboxInsertP
 
 	err := r.q.QueryRow(ctx, query,
 		id,
-		params.Topic,
+		params.EventType,
 		params.Payload,
 		params.Metadata,
 		params.IdempotencyKey,
 		params.MaxRetries,
 	).Scan(
 		&outbox.ID,
-		&outbox.Topic,
+		&outbox.EventType,
 		&outbox.Payload,
 		&outbox.Metadata,
 		&outbox.IdempotencyKey,
@@ -256,7 +256,7 @@ func (r *OutboxRepository) FetchAndLockToPublishing(ctx context.Context) (*core.
 
 	err := r.q.QueryRow(ctx, query).Scan(
 		&outbox.ID,
-		&outbox.Topic,
+		&outbox.EventType,
 		&outbox.Payload,
 		&outbox.Metadata,
 		&outbox.IdempotencyKey,
@@ -354,7 +354,7 @@ func (r *OutboxRepository) GetByID(ctx context.Context, id string) (*core.Outbox
 
 	err := r.q.QueryRow(ctx, query, id).Scan(
 		&outbox.ID,
-		&outbox.Topic,
+		&outbox.EventType,
 		&outbox.Payload,
 		&outbox.Metadata,
 		&outbox.IdempotencyKey,
@@ -383,17 +383,17 @@ func (r *OutboxRepository) GetByID(ctx context.Context, id string) (*core.Outbox
 	return &outbox, nil
 }
 
-// GetByIdempotencyKey retrieves an outbox message by topic and idempotency key
-func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, topic, idempotencyKey string) (*core.Outbox, error) {
+// GetByIdempotencyKey retrieves an outbox message by event_type and idempotency key
+func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, eventType, idempotencyKey string) (*core.Outbox, error) {
 	query := fmt.Sprintf(queryGetByIdempotencyKey, r.tableName)
 
 	var outbox core.Outbox
 	var errMsg sql.NullString
 	var nextRetryAt sql.NullTime
 
-	err := r.q.QueryRow(ctx, query, topic, idempotencyKey).Scan(
+	err := r.q.QueryRow(ctx, query, eventType, idempotencyKey).Scan(
 		&outbox.ID,
-		&outbox.Topic,
+		&outbox.EventType,
 		&outbox.Payload,
 		&outbox.Metadata,
 		&outbox.IdempotencyKey,
@@ -423,12 +423,12 @@ func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, topic, idemp
 }
 
 // InsertOutboxJSON is a helper to insert with a Go struct as payload
-func (r *OutboxRepository) InsertOutboxJSON(ctx context.Context, topic string, payload any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
-	return r.InsertOutboxJSONWithMetadata(ctx, topic, payload, nil, idempotencyKey, maxRetries)
+func (r *OutboxRepository) InsertOutboxJSON(ctx context.Context, eventType string, payload any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
+	return r.InsertOutboxJSONWithMetadata(ctx, eventType, payload, nil, idempotencyKey, maxRetries)
 }
 
 // InsertOutboxJSONWithMetadata is a helper to insert with a Go struct as payload and optional metadata
-func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, topic string, payload, metadata any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
+func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eventType string, payload, metadata any, idempotencyKey string, maxRetries int) (*core.Outbox, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -443,7 +443,7 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, top
 	}
 
 	return r.Insert(ctx, core.OutboxInsertParams{
-		Topic:          topic,
+		EventType:      eventType,
 		Payload:        data,
 		Metadata:       metadataBytes,
 		IdempotencyKey: idempotencyKey,
@@ -495,7 +495,7 @@ func (r *OutboxRepository) FetchLockAndMarkPublishing(ctx context.Context, limit
 
 		err := rows.Scan(
 			&outbox.ID,
-			&outbox.Topic,
+			&outbox.EventType,
 			&outbox.Payload,
 			&outbox.Metadata,
 			&outbox.IdempotencyKey,

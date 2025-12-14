@@ -10,7 +10,7 @@ type SQSMessage struct {
 	MessageID      string
 	ReceiptHandle  string
 	Body           json.RawMessage
-	Topic          string
+	EventType      string
 	OutboxID       *string
 	IdempotencyKey string
 	ReceiveCount   int

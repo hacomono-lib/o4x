@@ -1,15 +1,13 @@
-package gorm
+package pgx
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 
 	"github.com/hacomono-lib/o4x/core"
 )
@@ -17,7 +15,7 @@ import (
 // InboxRepositorySuite tests InboxRepository with real PostgreSQL database
 type InboxRepositorySuite struct {
 	suite.Suite
-	db        *gorm.DB
+	pool      *pgxpool.Pool
 	repo      *InboxRepository
 	tableName string
 }
@@ -30,33 +28,30 @@ func TestInboxRepositorySuite(t *testing.T) {
 }
 
 func (s *InboxRepositorySuite) SetupSuite() {
-	db, err := gorm.Open(postgres.Open(testDatabaseURL()), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, testDatabaseURL())
 	if err != nil {
 		s.T().Skipf("failed to connect to test database: %v (ensure docker-compose is running)", err)
 	}
-	s.db = db
+	s.pool = pool
 	s.tableName = "consumer_inbox"
-	s.repo = NewInboxRepository(db)
+	s.repo = NewInboxRepository(pool)
 
 	// Clean up table before starting suite
-	_ = s.db.Exec("DELETE FROM " + s.tableName)
+	_, _ = s.pool.Exec(ctx, "DELETE FROM "+s.tableName)
 }
 
 func (s *InboxRepositorySuite) TearDownSuite() {
-	if s.db != nil {
-		sqlDB, err := s.db.DB()
-		if err == nil {
-			sqlDB.Close()
-		}
+	if s.pool != nil {
+		s.pool.Close()
 	}
 }
 
 func (s *InboxRepositorySuite) SetupTest() {
 	// Clean up inbox table before each test
-	result := s.db.Exec("DELETE FROM " + s.tableName)
-	s.Require().NoError(result.Error)
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, "DELETE FROM "+s.tableName)
+	s.Require().NoError(err)
 }
 
 func (s *InboxRepositorySuite) TestTryStart_FirstTime_ReturnsTrue() {
@@ -173,7 +168,8 @@ func (s *InboxRepositorySuite) TestTryStart_Concurrent_OnlyOneSucceeds() {
 
 	// Verify only one record was created (Complete's ON CONFLICT guarantees this)
 	var count int64
-	s.db.Table(s.tableName).Where("consumer_name = ? AND message_id = ?", consumerName, messageID).Count(&count)
+	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM "+s.tableName+" WHERE consumer_name = $1 AND message_id = $2", consumerName, messageID).Scan(&count)
+	s.Require().NoError(err)
 	assert.Equal(s.T(), int64(1), count, "Only one record should exist in database")
 }
 
@@ -214,7 +210,8 @@ func (s *InboxRepositorySuite) TestComplete_Idempotent_MultipleCallsSucceed() {
 
 	// Verify only one record exists
 	var count int64
-	s.db.Table(s.tableName).Where("consumer_name = ? AND message_id = ?", consumerName, messageID).Count(&count)
+	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM "+s.tableName+" WHERE consumer_name = $1 AND message_id = $2", consumerName, messageID).Scan(&count)
+	s.Require().NoError(err)
 	assert.Equal(s.T(), int64(1), count)
 }
 
@@ -271,8 +268,8 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan() {
 	}
 
 	// Manually update completed_at to simulate old messages
-	result := s.db.Exec("UPDATE " + s.tableName + " SET completed_at = NOW() - INTERVAL '10 days' WHERE message_id LIKE 'msg-old-%'")
-	s.Require().NoError(result.Error)
+	_, err := s.pool.Exec(ctx, "UPDATE "+s.tableName+" SET completed_at = NOW() - INTERVAL '10 days' WHERE message_id LIKE 'msg-old-%'")
+	s.Require().NoError(err)
 
 	// Act: Delete messages older than 7 days
 	deleted, err := s.repo.DeleteOlderThan(ctx, 7*24*time.Hour)
@@ -300,8 +297,8 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan_KeepsRecentMessages() {
 	s.repo.Complete(ctx, consumerName, "msg-recent")
 
 	// Make one message old
-	result := s.db.Exec("UPDATE " + s.tableName + " SET completed_at = NOW() - INTERVAL '10 days' WHERE message_id = 'msg-old'")
-	s.Require().NoError(result.Error)
+	_, err := s.pool.Exec(ctx, "UPDATE "+s.tableName+" SET completed_at = NOW() - INTERVAL '10 days' WHERE message_id = 'msg-old'")
+	s.Require().NoError(err)
 
 	// Act: Delete messages older than 7 days
 	deleted, err := s.repo.DeleteOlderThan(ctx, 7*24*time.Hour)
@@ -312,7 +309,8 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan_KeepsRecentMessages() {
 
 	// Verify recent message still exists
 	var count int64
-	s.db.Table(s.tableName).Where("message_id = ?", "msg-recent").Count(&count)
+	err = s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM "+s.tableName+" WHERE message_id = 'msg-recent'").Scan(&count)
+	s.Require().NoError(err)
 	assert.Equal(s.T(), int64(1), count, "Recent message should remain")
 }
 
@@ -323,7 +321,10 @@ func (s *InboxRepositorySuite) TestWithTx_RollbackPreventsInsertion() {
 	messageID := "msg-tx-rollback"
 
 	// Act: Start transaction and rollback
-	tx := s.db.Begin()
+	tx, err := s.pool.Begin(ctx)
+	s.Require().NoError(err)
+	defer tx.Rollback(ctx)
+
 	txRepo := s.repo.WithTx(tx)
 
 	ok, err := txRepo.TryStart(ctx, consumerName, messageID)
@@ -333,7 +334,7 @@ func (s *InboxRepositorySuite) TestWithTx_RollbackPreventsInsertion() {
 	// Complete within transaction
 	txRepo.Complete(ctx, consumerName, messageID)
 
-	tx.Rollback()
+	tx.Rollback(ctx)
 
 	// Assert: Record should not exist after rollback
 	_, err = s.repo.GetByMessageID(ctx, consumerName, messageID)
@@ -347,7 +348,10 @@ func (s *InboxRepositorySuite) TestWithTx_CommitPersistsInsertion() {
 	messageID := "msg-tx-commit"
 
 	// Act: Start transaction and commit
-	tx := s.db.Begin()
+	tx, err := s.pool.Begin(ctx)
+	s.Require().NoError(err)
+	defer tx.Rollback(ctx)
+
 	txRepo := s.repo.WithTx(tx)
 
 	ok, err := txRepo.TryStart(ctx, consumerName, messageID)
@@ -357,7 +361,7 @@ func (s *InboxRepositorySuite) TestWithTx_CommitPersistsInsertion() {
 	// Complete within transaction
 	txRepo.Complete(ctx, consumerName, messageID)
 
-	tx.Commit()
+	tx.Commit(ctx)
 
 	// Assert: Record should exist after commit
 	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
@@ -375,34 +379,38 @@ func (s *InboxRepositorySuite) TestWithTx_BusinessTransactionWithInbox() {
 	messageID := "msg-business-tx"
 
 	// Simulate business table
-	s.db.Exec("CREATE TEMP TABLE IF NOT EXISTS test_orders (id TEXT PRIMARY KEY, amount INT)")
-	defer s.db.Exec("DROP TABLE test_orders")
+	_, err := s.pool.Exec(ctx, "CREATE TEMP TABLE IF NOT EXISTS test_orders (id TEXT PRIMARY KEY, amount INT)")
+	s.Require().NoError(err)
+	defer s.pool.Exec(ctx, "DROP TABLE IF EXISTS test_orders")
 
 	// Act: Transaction with business logic + inbox
-	tx := s.db.Begin()
+	tx, err := s.pool.Begin(ctx)
+	s.Require().NoError(err)
+	defer tx.Rollback(ctx)
 
 	// 1. Check idempotency
 	txRepo := s.repo.WithTx(tx)
 	ok, err := txRepo.TryStart(ctx, consumerName, messageID)
 	s.Require().NoError(err)
 	if !ok {
-		tx.Rollback()
+		tx.Rollback(ctx)
 		s.T().Fatal("Expected first TryStart to succeed")
 	}
 
 	// 2. Execute business logic
-	result := tx.Exec("INSERT INTO test_orders (id, amount) VALUES (?, ?)", "order-123", 1000)
-	s.Require().NoError(result.Error)
+	_, err = tx.Exec(ctx, "INSERT INTO test_orders (id, amount) VALUES ($1, $2)", "order-123", 1000)
+	s.Require().NoError(err)
 
 	// 3. Mark as completed within transaction
 	err = txRepo.Complete(ctx, consumerName, messageID)
 	s.Require().NoError(err)
 
-	tx.Commit()
+	tx.Commit(ctx)
 
 	// Assert: Both business data and inbox record should exist
 	var count int64
-	s.db.Raw("SELECT COUNT(*) FROM test_orders WHERE id = ?", "order-123").Scan(&count)
+	err = s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM test_orders WHERE id = $1", "order-123").Scan(&count)
+	s.Require().NoError(err)
 	assert.Equal(s.T(), int64(1), count, "Business record should exist")
 
 	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
@@ -419,20 +427,24 @@ func (s *InboxRepositorySuite) TestWithTx_DuplicatePreventsBusinessLogic() {
 	messageID := "msg-duplicate-prevention"
 
 	// Simulate business table
-	s.db.Exec("CREATE TEMP TABLE IF NOT EXISTS test_orders (id TEXT PRIMARY KEY, amount INT)")
-	defer s.db.Exec("DROP TABLE test_orders")
+	_, err := s.pool.Exec(ctx, "CREATE TEMP TABLE IF NOT EXISTS test_orders (id TEXT PRIMARY KEY, amount INT)")
+	s.Require().NoError(err)
+	defer s.pool.Exec(ctx, "DROP TABLE IF EXISTS test_orders")
 
 	// First message processing
-	tx1 := s.db.Begin()
+	tx1, err := s.pool.Begin(ctx)
+	s.Require().NoError(err)
 	txRepo1 := s.repo.WithTx(tx1)
 	ok1, _ := txRepo1.TryStart(ctx, consumerName, messageID)
 	s.Require().True(ok1)
-	tx1.Exec("INSERT INTO test_orders (id, amount) VALUES (?, ?)", "order-456", 2000)
+	tx1.Exec(ctx, "INSERT INTO test_orders (id, amount) VALUES ($1, $2)", "order-456", 2000)
 	txRepo1.Complete(ctx, consumerName, messageID) // Mark as completed
-	tx1.Commit()
+	tx1.Commit(ctx)
 
 	// Act: Duplicate message processing
-	tx2 := s.db.Begin()
+	tx2, err := s.pool.Begin(ctx)
+	s.Require().NoError(err)
+	defer tx2.Rollback(ctx)
 	txRepo2 := s.repo.WithTx(tx2)
 	ok2, err2 := txRepo2.TryStart(ctx, consumerName, messageID)
 
@@ -440,10 +452,11 @@ func (s *InboxRepositorySuite) TestWithTx_DuplicatePreventsBusinessLogic() {
 	assert.NoError(s.T(), err2)
 	assert.False(s.T(), ok2, "Duplicate should be detected")
 
-	tx2.Rollback()
+	tx2.Rollback(ctx)
 
 	// Verify only one business record exists
 	var count int64
-	s.db.Raw("SELECT COUNT(*) FROM test_orders WHERE id = ?", "order-456").Scan(&count)
+	err = s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM test_orders WHERE id = $1", "order-456").Scan(&count)
+	s.Require().NoError(err)
 	assert.Equal(s.T(), int64(1), count, "Only one business record should exist")
 }

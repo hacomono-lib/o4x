@@ -24,7 +24,7 @@ func TestHooksSuite(t *testing.T) {
 
 func (s *HooksSuite) SetupTest() {
 	s.ctx = context.Background()
-	s.msg = &Outbox{ID: "test-id", Topic: "test-topic"}
+	s.msg = &Outbox{ID: "test-id", EventType: "test-topic"}
 }
 
 func (s *HooksSuite) TestNilHooks_AllCallsAreSafe() {
@@ -130,7 +130,7 @@ func (s *HooksSuite) TestOnMessageDead_CallsHookWithMessage() {
 			capturedMsg = msg
 		},
 	}
-	deadMsg := &Outbox{ID: "dead-msg", Topic: "test-topic"}
+	deadMsg := &Outbox{ID: "dead-msg", EventType: "test-topic"}
 
 	// Act
 	hooks.callOnMessageDead(s.ctx, deadMsg, nil)

@@ -415,7 +415,7 @@ func (d *BatchDispatcher) processBatch(ctx context.Context, logger *slog.Logger)
 // handlePublishFailure handles a failed publish for a single message
 func (d *BatchDispatcher) handlePublishFailure(ctx context.Context, msg *Outbox, publishErr error, duration time.Duration, logger *slog.Logger) {
 	errMsg := TruncateErrorMessage(publishErr.Error())
-	msgLogger := logger.With("outbox_id", msg.ID, "topic", msg.Topic)
+	msgLogger := logger.With("outbox_id", msg.ID, "event_type", msg.EventType)
 
 	// Check if error is permanently non-retryable
 	retryable := IsRetryable(publishErr)

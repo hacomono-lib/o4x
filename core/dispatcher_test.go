@@ -167,7 +167,7 @@ func (s *DispatcherSuite) TestStartAndStop_IsRunningReflectsState() {
 
 func (s *DispatcherSuite) TestDispatcher_ProcessesMessages() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	config := DispatcherConfig{
@@ -196,7 +196,7 @@ func (s *DispatcherSuite) TestDispatcher_ProcessesMessages() {
 
 func (s *DispatcherSuite) TestDispatcher_HandlesPublishFailure() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -229,7 +229,7 @@ func (s *DispatcherSuite) TestDispatcher_HandlesPublishFailure() {
 
 func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadAfterMaxRetries() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.topic", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -261,7 +261,7 @@ func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadAfterMaxRetries() {
 
 func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadOnPermanentError() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -293,7 +293,7 @@ func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadOnPermanentError() {
 
 func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishStart() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	var hookCalled bool
@@ -332,7 +332,7 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishStart() {
 
 func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishSuccess() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	var hookCalled bool
@@ -371,7 +371,7 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishSuccess() {
 
 func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishFailure() {
 	// Arrange
-	msg := createTestOutbox("test.topic", map[string]string{"key": "value"})
+	msg := createTestOutbox("test.event", map[string]string{"key": "value"})
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -417,7 +417,7 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishFailure() {
 
 func (s *DispatcherSuite) TestDispatcher_CallsHooksOnMessageDead() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.topic", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {

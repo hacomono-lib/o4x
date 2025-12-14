@@ -79,7 +79,7 @@ func (s *OutboxRepositorySuite) TestInsert_CreatesNewOutboxMessage() {
 	// Arrange
 	ctx := context.Background()
 	params := core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-1",
 		MaxRetries:     5,
@@ -91,7 +91,7 @@ func (s *OutboxRepositorySuite) TestInsert_CreatesNewOutboxMessage() {
 	// Assert
 	assert.NoError(s.T(), err)
 	assert.NotEmpty(s.T(), msg.ID)
-	assert.Equal(s.T(), "test.topic", msg.Topic)
+	assert.Equal(s.T(), "test.event", msg.EventType)
 	assert.Equal(s.T(), "test-idem-key-1", msg.IdempotencyKey)
 	assert.Equal(s.T(), core.OutboxStatusEnqueued, msg.Status)
 	assert.Equal(s.T(), 0, msg.RetryCount)
@@ -102,7 +102,7 @@ func (s *OutboxRepositorySuite) TestFetchAndLockToPublishing_ReturnsEnqueuedMess
 	// Arrange
 	ctx := context.Background()
 	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-2",
 		MaxRetries:     3,
@@ -139,7 +139,7 @@ func (s *OutboxRepositorySuite) TestUpdateToPublished_ChangesStatus() {
 	// Arrange
 	ctx := context.Background()
 	_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-4",
 		MaxRetries:     3,
@@ -163,7 +163,7 @@ func (s *OutboxRepositorySuite) TestUpdateToFailed_ChangesStatusAndIncrementsRet
 	// Arrange
 	ctx := context.Background()
 	_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-5",
 		MaxRetries:     3,
@@ -191,7 +191,7 @@ func (s *OutboxRepositorySuite) TestUpdateToDead_ChangesStatus() {
 	// Arrange
 	ctx := context.Background()
 	_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-6",
 		MaxRetries:     3,
@@ -219,7 +219,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_MovesFailedToEnqueuedWithBacko
 
 	// Insert and mark as failed
 	_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-7",
 		MaxRetries:     3,
@@ -253,7 +253,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_RespectsExponentialBackoff() {
 
 	// Insert and fail multiple times
 	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-8",
 		MaxRetries:     10,
@@ -296,7 +296,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_DoesNotRequeueMaxRetriesExceed
 
 	// Insert with maxRetries=1 and fail once
 	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-9",
 		MaxRetries:     1,
@@ -326,7 +326,7 @@ func (s *OutboxRepositorySuite) TestGetByID_ReturnsMessage() {
 	// Arrange
 	ctx := context.Background()
 	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-10",
 		MaxRetries:     3,
@@ -339,7 +339,7 @@ func (s *OutboxRepositorySuite) TestGetByID_ReturnsMessage() {
 	// Assert
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), inserted.ID, msg.ID)
-	assert.Equal(s.T(), "test.topic", msg.Topic)
+	assert.Equal(s.T(), "test.event", msg.EventType)
 }
 
 func (s *OutboxRepositorySuite) TestGetByID_ReturnsErrNotFoundForNonExistent() {
@@ -358,7 +358,7 @@ func (s *OutboxRepositorySuite) TestGetByIdempotencyKey_ReturnsMessage() {
 	// Arrange
 	ctx := context.Background()
 	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-11",
 		MaxRetries:     3,
@@ -366,7 +366,7 @@ func (s *OutboxRepositorySuite) TestGetByIdempotencyKey_ReturnsMessage() {
 	s.Require().NoError(err)
 
 	// Act
-	msg, err := s.repo.GetByIdempotencyKey(ctx, "test.topic", "test-idem-key-11")
+	msg, err := s.repo.GetByIdempotencyKey(ctx, "test.event", "test-idem-key-11")
 
 	// Assert
 	assert.NoError(s.T(), err)
@@ -378,7 +378,7 @@ func (s *OutboxRepositorySuite) TestGetByIdempotencyKey_ReturnsErrNotFoundForNon
 	ctx := context.Background()
 
 	// Act
-	msg, err := s.repo.GetByIdempotencyKey(ctx, "test.topic", "non-existent-key")
+	msg, err := s.repo.GetByIdempotencyKey(ctx, "test.event", "non-existent-key")
 
 	// Assert
 	assert.ErrorIs(s.T(), err, core.ErrNotFound)
@@ -391,7 +391,7 @@ func (s *OutboxRepositorySuite) TestReviveStuckPublishing_MovesPublishingToFaile
 
 	// Insert and set to PUBLISHING using FetchAndLockToPublishing
 	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-12",
 		MaxRetries:     3,
@@ -430,7 +430,7 @@ func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_AtomicallyLocksAn
 	// Insert multiple messages
 	for i := 0; i < 5; i++ {
 		_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-			Topic:          "test.topic",
+			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "test-idem-key-batch-" + string(rune('a'+i)),
 			MaxRetries:     3,
@@ -456,7 +456,7 @@ func (s *OutboxRepositorySuite) TestUpdateBatchToPublished_UpdatesMultipleMessag
 	// Insert multiple messages
 	for i := 0; i < 3; i++ {
 		_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-			Topic:          "test.topic",
+			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "test-idem-key-batch2-" + string(rune('a'+i)),
 			MaxRetries:     3,
@@ -492,7 +492,7 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_DeletesOldMessages() {
 
 	// Insert and publish a message
 	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-delete",
 		MaxRetries:     3,
@@ -526,7 +526,7 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_E2E_ComprehensiveScenarios()
 
 	// Create messages with different statuses and ages
 	testCases := []struct {
-		topic           string
+		eventType       string
 		status          core.OutboxStatus
 		ageHours        int
 		shouldDelete    bool
@@ -552,13 +552,13 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_E2E_ComprehensiveScenarios()
 	// Insert all test messages
 	for _, tc := range testCases {
 		inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-			Topic:          tc.topic,
+			EventType:      tc.eventType,
 			Payload:        s.createPayload(map[string]interface{}{"test": "data"}),
-			IdempotencyKey: "e2e-" + tc.topic,
+			IdempotencyKey: "e2e-" + tc.eventType,
 			MaxRetries:     3,
 		})
 		s.Require().NoError(err)
-		messageIDs[tc.topic] = inserted.ID
+		messageIDs[tc.eventType] = inserted.ID
 
 		// Update to desired status
 		switch tc.status {
@@ -591,22 +591,22 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_E2E_ComprehensiveScenarios()
 
 	// Verify each message's existence
 	for _, tc := range testCases {
-		msgID := messageIDs[tc.topic]
+		msgID := messageIDs[tc.eventType]
 		_, err := s.repo.GetByID(ctx, msgID)
 
 		if tc.shouldDelete {
-			s.Assert().ErrorIs(err, core.ErrNotFound, "Message %s should be deleted", tc.topic)
+			s.Assert().ErrorIs(err, core.ErrNotFound, "Message %s should be deleted", tc.eventType)
 		} else {
-			s.Assert().NoError(err, "Message %s should still exist", tc.topic)
+			s.Assert().NoError(err, "Message %s should still exist", tc.eventType)
 		}
 	}
 
 	// Cleanup: Delete remaining messages
-	for topic, msgID := range messageIDs {
+	for eventType, msgID := range messageIDs {
 		if _, err := s.repo.GetByID(ctx, msgID); err == nil {
 			_, _ = s.pool.Exec(ctx, "DELETE FROM "+s.tableName+" WHERE id = $1", msgID)
 		}
-		_ = topic // avoid unused warning
+		_ = eventType // avoid unused warning
 	}
 }
 
@@ -621,7 +621,7 @@ func (s *OutboxRepositorySuite) TestWithTx_UsesTransactionForInsert() {
 
 	// Act
 	inserted, err := txRepo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-tx",
 		MaxRetries:     3,
@@ -669,7 +669,7 @@ func (s *WithCustomTableNameSuite) SetupSuite() {
 	_, err = pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS custom_outbox (
 			id UUID PRIMARY KEY,
-			topic TEXT NOT NULL,
+			event_type TEXT NOT NULL,
 			payload JSONB NOT NULL,
 			metadata JSONB,
 			idempotency_key TEXT NOT NULL,
@@ -706,7 +706,7 @@ func (s *WithCustomTableNameSuite) TestWithOutboxTableName_UsesCustomTable() {
 
 	// Act
 	inserted, err := repo.Insert(ctx, core.OutboxInsertParams{
-		Topic:          "test.topic",
+		EventType:      "test.event",
 		Payload:        json.RawMessage(`{"key":"value"}`),
 		IdempotencyKey: "custom-table-key",
 		MaxRetries:     3,
@@ -732,7 +732,7 @@ func (s *OutboxRepositorySuite) TestFetchAndLockToPublishing_MultipleWorkersNoCo
 	numMessages := 10
 	for i := 0; i < numMessages; i++ {
 		_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-			Topic:          "test.topic",
+			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: fmt.Sprintf("concurrent-test-%d", i),
 			MaxRetries:     3,
@@ -800,7 +800,7 @@ func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_MultipleWorkersNo
 	numMessages := 20
 	for i := 0; i < numMessages; i++ {
 		_, err := s.repo.Insert(ctx, core.OutboxInsertParams{
-			Topic:          "test.topic",
+			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: fmt.Sprintf("batch-concurrent-test-%d", i),
 			MaxRetries:     3,

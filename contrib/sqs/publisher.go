@@ -41,7 +41,7 @@ func NewPublisher(client SQSClient, queueURL string) *Publisher {
 
 // Publish sends a message to the SQS FIFO queue
 // Important for FIFO queues:
-//   - MessageGroupId = topic (ensures ordering per topic)
+//   - MessageGroupId = event_type (ensures ordering per event_type)
 //   - MessageDeduplicationId = idempotency_key (prevents duplicates)
 func (p *Publisher) Publish(ctx context.Context, msg *core.Outbox) error {
 	// Validate payload size to prevent permanent failures
@@ -60,9 +60,9 @@ func (p *Publisher) Publish(ctx context.Context, msg *core.Outbox) error {
 // buildMessageAttributes creates SQS message attributes from outbox metadata
 func buildMessageAttributes(msg *core.Outbox) map[string]sqstypes.MessageAttributeValue {
 	return map[string]sqstypes.MessageAttributeValue{
-		"topic": {
+		"event_type": {
 			DataType:    aws.String("String"),
-			StringValue: aws.String(msg.Topic),
+			StringValue: aws.String(msg.EventType),
 		},
 		"outbox_id": {
 			DataType:    aws.String("String"),
@@ -86,7 +86,7 @@ func buildSendMessageInput(queueURL string, msg *core.Outbox) *sqs.SendMessageIn
 
 	// Only set FIFO-specific parameters if this is a FIFO queue
 	if isFifoQueue(queueURL) {
-		input.MessageGroupId = aws.String(msg.Topic)
+		input.MessageGroupId = aws.String(msg.EventType)
 		input.MessageDeduplicationId = aws.String(msg.IdempotencyKey)
 	}
 
@@ -104,7 +104,7 @@ func buildBatchEntry(queueURL string, msg *core.Outbox) sqstypes.SendMessageBatc
 
 	// Only set FIFO-specific parameters if this is a FIFO queue
 	if isFifoQueue(queueURL) {
-		entry.MessageGroupId = aws.String(msg.Topic)
+		entry.MessageGroupId = aws.String(msg.EventType)
 		entry.MessageDeduplicationId = aws.String(msg.IdempotencyKey)
 	}
 
@@ -130,17 +130,17 @@ type PublisherConfig struct {
 	Region      string
 }
 
-// TopicQueueRouter determines which queue URL to use for a given topic
-type TopicQueueRouter interface {
-	// QueueURL returns the queue URL for the given topic
+// EventTypeQueueRouter determines which queue URL to use for a given event_type
+type EventTypeQueueRouter interface {
+	// QueueURL returns the queue URL for the given event_type
 	// If no specific mapping exists, returns the default queue URL
-	QueueURL(topic string) string
+	QueueURL(eventType string) string
 }
 
-// TopicQueueMap is a simple map-based implementation of TopicQueueRouter
+// EventTypeQueueMap is a simple map-based implementation of EventTypeQueueRouter
 // It supports exact matches and prefix matches with longest-prefix-first priority.
 // Thread-safe for concurrent access.
-type TopicQueueMap struct {
+type EventTypeQueueMap struct {
 	mu           sync.RWMutex
 	routes       map[string]string // exact matches
 	prefixes     []prefixRoute     // prefix matches, sorted by length descending
@@ -153,25 +153,25 @@ type prefixRoute struct {
 	queueURL string
 }
 
-// NewTopicQueueMap creates a new TopicQueueMap with a default queue
-func NewTopicQueueMap(defaultQueue string) *TopicQueueMap {
-	return &TopicQueueMap{
+// NewEventTypeQueueMap creates a new EventTypeQueueMap with a default queue
+func NewEventTypeQueueMap(defaultQueue string) *EventTypeQueueMap {
+	return &EventTypeQueueMap{
 		routes:       make(map[string]string),
 		prefixes:     nil,
 		defaultQueue: defaultQueue,
 	}
 }
 
-// Register maps a topic to a specific queue URL
-func (m *TopicQueueMap) Register(topic, queueURL string) {
+// Register maps an event_type to a specific queue URL
+func (m *EventTypeQueueMap) Register(eventType, queueURL string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.routes[topic] = queueURL
+	m.routes[eventType] = queueURL
 }
 
-// RegisterPrefix maps all topics with a given prefix to a specific queue URL.
+// RegisterPrefix maps all event types with a given prefix to a specific queue URL.
 // Longer prefixes take priority over shorter ones.
-func (m *TopicQueueMap) RegisterPrefix(prefix, queueURL string) {
+func (m *EventTypeQueueMap) RegisterPrefix(prefix, queueURL string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -198,20 +198,20 @@ func (m *TopicQueueMap) RegisterPrefix(prefix, queueURL string) {
 	}
 }
 
-// QueueURL returns the queue URL for the given topic.
+// QueueURL returns the queue URL for the given event_type.
 // Priority: exact match > longest prefix match > default queue
-func (m *TopicQueueMap) QueueURL(topic string) string {
+func (m *EventTypeQueueMap) QueueURL(eventType string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	// Exact match first (O(1))
-	if url, ok := m.routes[topic]; ok {
+	if url, ok := m.routes[eventType]; ok {
 		return url
 	}
 
 	// Check prefix matches (longest prefix first due to sorted order)
 	for _, p := range m.prefixes {
-		if len(topic) >= len(p.prefix) && topic[:len(p.prefix)] == p.prefix {
+		if len(eventType) >= len(p.prefix) && eventType[:len(p.prefix)] == p.prefix {
 			return p.queueURL
 		}
 	}
@@ -219,21 +219,21 @@ func (m *TopicQueueMap) QueueURL(topic string) string {
 	return m.defaultQueue
 }
 
-// MultiQueuePublisher implements core.Publisher with topic-based queue routing
+// MultiQueuePublisher implements core.Publisher with event_type-based queue routing
 type MultiQueuePublisher struct {
 	client SQSClient
-	router TopicQueueRouter
+	router EventTypeQueueRouter
 }
 
 // NewMultiQueuePublisher creates a new multi-queue SQS publisher
-func NewMultiQueuePublisher(client SQSClient, router TopicQueueRouter) *MultiQueuePublisher {
+func NewMultiQueuePublisher(client SQSClient, router EventTypeQueueRouter) *MultiQueuePublisher {
 	return &MultiQueuePublisher{
 		client: client,
 		router: router,
 	}
 }
 
-// Publish sends a message to the appropriate SQS queue based on topic
+// Publish sends a message to the appropriate SQS queue based on event_type
 func (p *MultiQueuePublisher) Publish(ctx context.Context, msg *core.Outbox) error {
 	// Validate payload size
 	if len(msg.Payload) > MaxSQSMessageSize {
@@ -241,7 +241,7 @@ func (p *MultiQueuePublisher) Publish(ctx context.Context, msg *core.Outbox) err
 			core.ErrPayloadTooLarge, len(msg.Payload), MaxSQSMessageSize))
 	}
 
-	queueURL := p.router.QueueURL(msg.Topic)
+	queueURL := p.router.QueueURL(msg.EventType)
 	_, err := p.client.SendMessage(ctx, buildSendMessageInput(queueURL, msg))
 	if err != nil {
 		return fmt.Errorf("sqs publish to %s failed: %w", queueURL, err)
@@ -372,14 +372,14 @@ func (p *BatchPublisher) MaxBatchSize() int {
 	return sqsMaxBatchSize
 }
 
-// MultiBatchPublisher implements core.BatchPublisher with topic-based queue routing
+// MultiBatchPublisher implements core.BatchPublisher with event_type-based queue routing
 type MultiBatchPublisher struct {
 	client SQSClient
-	router TopicQueueRouter
+	router EventTypeQueueRouter
 }
 
 // NewMultiBatchPublisher creates a new multi-queue SQS batch publisher
-func NewMultiBatchPublisher(client SQSClient, router TopicQueueRouter) *MultiBatchPublisher {
+func NewMultiBatchPublisher(client SQSClient, router EventTypeQueueRouter) *MultiBatchPublisher {
 	return &MultiBatchPublisher{
 		client: client,
 		router: router,
@@ -394,7 +394,7 @@ func (p *MultiBatchPublisher) Publish(ctx context.Context, msg *core.Outbox) err
 			core.ErrPayloadTooLarge, len(msg.Payload), MaxSQSMessageSize))
 	}
 
-	queueURL := p.router.QueueURL(msg.Topic)
+	queueURL := p.router.QueueURL(msg.EventType)
 	_, err := p.client.SendMessage(ctx, buildSendMessageInput(queueURL, msg))
 	if err != nil {
 		return fmt.Errorf("sqs publish to %s failed: %w", queueURL, err)
@@ -402,7 +402,7 @@ func (p *MultiBatchPublisher) Publish(ctx context.Context, msg *core.Outbox) err
 	return nil
 }
 
-// PublishBatch sends messages to appropriate queues based on topic.
+// PublishBatch sends messages to appropriate queues based on event_type.
 // Messages are grouped by queue URL and sent in parallel batches for better performance.
 func (p *MultiBatchPublisher) PublishBatch(ctx context.Context, msgs []*core.Outbox) []core.PublishResult {
 	if len(msgs) == 0 {
@@ -417,7 +417,7 @@ func (p *MultiBatchPublisher) PublishBatch(ctx context.Context, msgs []*core.Out
 	// Group messages by queue URL
 	queueGroups := make(map[string][]*indexedMessage)
 	for i, msg := range msgs {
-		queueURL := p.router.QueueURL(msg.Topic)
+		queueURL := p.router.QueueURL(msg.EventType)
 		queueGroups[queueURL] = append(queueGroups[queueURL], &indexedMessage{
 			index: i,
 			msg:   msg,

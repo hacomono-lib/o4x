@@ -39,7 +39,7 @@ func (h *Hooks) callOnConsumeStart(ctx context.Context, msg *SQSMessage) {
 					"hook", "OnConsumeStart",
 					"panic", r,
 					"message_id", msg.MessageID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()
@@ -57,7 +57,7 @@ func (h *Hooks) callOnConsumeSuccess(ctx context.Context, msg *SQSMessage, durat
 					"hook", "OnConsumeSuccess",
 					"panic", r,
 					"message_id", msg.MessageID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()
@@ -75,7 +75,7 @@ func (h *Hooks) callOnConsumeFailure(ctx context.Context, msg *SQSMessage, err e
 					"hook", "OnConsumeFailure",
 					"panic", r,
 					"message_id", msg.MessageID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()
@@ -93,7 +93,7 @@ func (h *Hooks) callOnMessageDead(ctx context.Context, msg *SQSMessage, err erro
 					"hook", "OnMessageDead",
 					"panic", r,
 					"message_id", msg.MessageID,
-					"topic", msg.Topic,
+					"event_type", msg.EventType,
 				)
 			}
 		}()

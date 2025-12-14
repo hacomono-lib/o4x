@@ -355,7 +355,7 @@ messageLoop:
 func (s *Service) processMessage(ctx context.Context, sqsMsg sqstypes.Message, logger *slog.Logger) {
 	// Parse message
 	msg := s.parseSQSMessage(sqsMsg)
-	logger = logger.With("message_id", msg.MessageID, "topic", msg.Topic)
+	logger = logger.With("message_id", msg.MessageID, "event_type", msg.EventType)
 
 	logger.DebugContext(ctx, "processing message")
 
@@ -445,8 +445,8 @@ func (s *Service) parseSQSMessage(sqsMsg sqstypes.Message) *SQSMessage {
 	}
 
 	// Parse custom message attributes
-	if topicAttr, ok := sqsMsg.MessageAttributes["topic"]; ok {
-		msg.Topic = aws.ToString(topicAttr.StringValue)
+	if eventTypeAttr, ok := sqsMsg.MessageAttributes["event_type"]; ok {
+		msg.EventType = aws.ToString(eventTypeAttr.StringValue)
 	}
 
 	if outboxIDAttr, ok := sqsMsg.MessageAttributes["outbox_id"]; ok {

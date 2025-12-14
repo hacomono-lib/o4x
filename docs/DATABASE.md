@@ -19,7 +19,7 @@ The outbox table stores messages for the transactional outbox pattern.
 ```sql
 CREATE TABLE outbox (
   id               UUID PRIMARY KEY,
-  topic            TEXT NOT NULL,
+  event_type       TEXT NOT NULL,
   payload          JSONB NOT NULL,
   metadata         JSONB,                                         -- Optional trace context, custom headers
   idempotency_key  TEXT NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE outbox (
   next_retry_at    TIMESTAMPTZ,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT uq_outbox_topic_idempotency UNIQUE (topic, idempotency_key)
+  CONSTRAINT uq_outbox_event_type_idempotency UNIQUE (event_type, idempotency_key)
 );
 ```
 
@@ -118,7 +118,7 @@ CREATE INDEX idx_outbox_retry_failed
 
 **Query pattern**:
 ```sql
-INSERT INTO outbox (id, topic, payload, idempotency_key, ...)
+INSERT INTO outbox (id, event_type, payload, idempotency_key, ...)
 VALUES (...);
 ```
 
@@ -342,7 +342,7 @@ ORDER BY count DESC;
 
 **Check stuck PUBLISHING messages**:
 ```sql
-SELECT id, topic, retry_count, max_retries,
+SELECT id, event_type, retry_count, max_retries,
        updated_at, NOW() - updated_at as stuck_duration, error_message
 FROM outbox
 WHERE status = 'PUBLISHING'
@@ -352,7 +352,7 @@ ORDER BY updated_at ASC;
 
 **Check high retry count messages**:
 ```sql
-SELECT id, topic, status, retry_count, max_retries, error_message
+SELECT id, event_type, status, retry_count, max_retries, error_message
 FROM outbox
 WHERE retry_count >= max_retries - 2
   AND status IN ('FAILED', 'DEAD')

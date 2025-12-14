@@ -27,7 +27,7 @@ const (
 // Outbox represents a message in the transactional outbox table
 type Outbox struct {
 	ID             string          `json:"id"` // UUID v7
-	Topic          string          `json:"topic"`
+	EventType      string          `json:"event_type"`
 	Payload        json.RawMessage `json:"payload"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"` // Optional metadata (trace context, custom headers, etc.)
 	IdempotencyKey string          `json:"idempotency_key"`
@@ -42,7 +42,7 @@ type Outbox struct {
 
 // OutboxInsertParams contains parameters for inserting a new outbox message
 type OutboxInsertParams struct {
-	Topic          string
+	EventType      string
 	Payload        json.RawMessage
 	Metadata       json.RawMessage // Optional metadata (trace_id, span_id, custom headers, etc.)
 	IdempotencyKey string

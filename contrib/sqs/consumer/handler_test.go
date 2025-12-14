@@ -29,7 +29,7 @@ func (s *HandlerFuncSuite) TestHandlerFunc_CallsUnderlyingFunction() {
 
 	msg := &SQSMessage{
 		MessageID: "test-id",
-		Topic:     "test.topic",
+		EventType: "test.event",
 		Body:      json.RawMessage(`{"key":"value"}`),
 	}
 
@@ -59,18 +59,18 @@ func (s *HandlerFuncSuite) TestHandlerFunc_PropagatesError() {
 	assert.ErrorIs(s.T(), err, expectedErr)
 }
 
-// TopicRouterSuite tests TopicRouter functionality
-type TopicRouterSuite struct {
+// EventTypeRouterSuite tests EventTypeRouter functionality
+type EventTypeRouterSuite struct {
 	suite.Suite
 }
 
-func TestTopicRouterSuite(t *testing.T) {
-	suite.Run(t, new(TopicRouterSuite))
+func TestEventTypeRouterSuite(t *testing.T) {
+	suite.Run(t, new(EventTypeRouterSuite))
 }
 
-func (s *TopicRouterSuite) TestNewTopicRouter_CreatesEmptyRouter() {
+func (s *EventTypeRouterSuite) TestNewEventTypeRouter_CreatesEmptyRouter() {
 	// Arrange & Act
-	router := NewTopicRouter()
+	router := NewEventTypeRouter()
 
 	// Assert
 	assert.NotNil(s.T(), router)
@@ -78,9 +78,9 @@ func (s *TopicRouterSuite) TestNewTopicRouter_CreatesEmptyRouter() {
 	assert.Nil(s.T(), router.fallback)
 }
 
-func (s *TopicRouterSuite) TestRegister_AddsHandler() {
+func (s *EventTypeRouterSuite) TestRegister_AddsHandler() {
 	// Arrange
-	router := NewTopicRouter()
+	router := NewEventTypeRouter()
 	var handlerCalled bool
 	handler := HandlerFunc(func(ctx context.Context, msg *SQSMessage) error {
 		handlerCalled = true
@@ -88,8 +88,8 @@ func (s *TopicRouterSuite) TestRegister_AddsHandler() {
 	})
 
 	// Act
-	router.Register("test.topic", handler)
-	msg := &SQSMessage{Topic: "test.topic"}
+	router.Register("test.event", handler)
+	msg := &SQSMessage{EventType: "test.event"}
 	err := router.Handle(context.Background(), msg)
 
 	// Assert
@@ -97,17 +97,17 @@ func (s *TopicRouterSuite) TestRegister_AddsHandler() {
 	assert.True(s.T(), handlerCalled)
 }
 
-func (s *TopicRouterSuite) TestRegisterFunc_AddsHandlerFunction() {
+func (s *EventTypeRouterSuite) TestRegisterFunc_AddsHandlerFunction() {
 	// Arrange
-	router := NewTopicRouter()
+	router := NewEventTypeRouter()
 	var handlerCalled bool
 
 	// Act
-	router.RegisterFunc("test.topic", func(ctx context.Context, msg *SQSMessage) error {
+	router.RegisterFunc("test.event", func(ctx context.Context, msg *SQSMessage) error {
 		handlerCalled = true
 		return nil
 	})
-	msg := &SQSMessage{Topic: "test.topic"}
+	msg := &SQSMessage{EventType: "test.event"}
 	err := router.Handle(context.Background(), msg)
 
 	// Assert
@@ -115,32 +115,32 @@ func (s *TopicRouterSuite) TestRegisterFunc_AddsHandlerFunction() {
 	assert.True(s.T(), handlerCalled)
 }
 
-func (s *TopicRouterSuite) TestHandle_RoutesToCorrectHandler() {
+func (s *EventTypeRouterSuite) TestHandle_RoutesToCorrectHandler() {
 	// Arrange
-	router := NewTopicRouter()
-	var handledTopics []string
+	router := NewEventTypeRouter()
+	var handledEventTypes []string
 
-	router.RegisterFunc("topic.a", func(ctx context.Context, msg *SQSMessage) error {
-		handledTopics = append(handledTopics, "a")
+	router.RegisterFunc("event.a", func(ctx context.Context, msg *SQSMessage) error {
+		handledEventTypes = append(handledEventTypes, "a")
 		return nil
 	})
-	router.RegisterFunc("topic.b", func(ctx context.Context, msg *SQSMessage) error {
-		handledTopics = append(handledTopics, "b")
+	router.RegisterFunc("event.b", func(ctx context.Context, msg *SQSMessage) error {
+		handledEventTypes = append(handledEventTypes, "b")
 		return nil
 	})
 
 	// Act
-	_ = router.Handle(context.Background(), &SQSMessage{Topic: "topic.b"})
-	_ = router.Handle(context.Background(), &SQSMessage{Topic: "topic.a"})
-	_ = router.Handle(context.Background(), &SQSMessage{Topic: "topic.b"})
+	_ = router.Handle(context.Background(), &SQSMessage{EventType: "event.b"})
+	_ = router.Handle(context.Background(), &SQSMessage{EventType: "event.a"})
+	_ = router.Handle(context.Background(), &SQSMessage{EventType: "event.b"})
 
 	// Assert
-	assert.Equal(s.T(), []string{"b", "a", "b"}, handledTopics)
+	assert.Equal(s.T(), []string{"b", "a", "b"}, handledEventTypes)
 }
 
-func (s *TopicRouterSuite) TestHandle_UseFallbackForUnknownTopic() {
+func (s *EventTypeRouterSuite) TestHandle_UseFallbackForUnknownEventType() {
 	// Arrange
-	router := NewTopicRouter()
+	router := NewEventTypeRouter()
 	var fallbackCalled bool
 
 	router.SetFallback(HandlerFunc(func(ctx context.Context, msg *SQSMessage) error {
@@ -149,63 +149,63 @@ func (s *TopicRouterSuite) TestHandle_UseFallbackForUnknownTopic() {
 	}))
 
 	// Act
-	err := router.Handle(context.Background(), &SQSMessage{Topic: "unknown.topic"})
+	err := router.Handle(context.Background(), &SQSMessage{EventType: "unknown.event"})
 
 	// Assert
 	assert.NoError(s.T(), err)
 	assert.True(s.T(), fallbackCalled)
 }
 
-func (s *TopicRouterSuite) TestHandle_ReturnsErrorForUnknownTopicByDefault() {
+func (s *EventTypeRouterSuite) TestHandle_ReturnsErrorForUnknownEventTypeByDefault() {
 	// Arrange
-	router := NewTopicRouter()
-	router.RegisterFunc("known.topic", func(ctx context.Context, msg *SQSMessage) error {
+	router := NewEventTypeRouter()
+	router.RegisterFunc("known.event", func(ctx context.Context, msg *SQSMessage) error {
 		return errors.New("should not be called")
 	})
 
 	// Act
-	err := router.Handle(context.Background(), &SQSMessage{Topic: "unknown.topic"})
+	err := router.Handle(context.Background(), &SQSMessage{EventType: "unknown.event"})
 
 	// Assert
 	assert.Error(s.T(), err)
-	assert.ErrorIs(s.T(), err, ErrUnknownTopic)
-	assert.Contains(s.T(), err.Error(), "unknown.topic")
+	assert.ErrorIs(s.T(), err, ErrUnknownEventType)
+	assert.Contains(s.T(), err.Error(), "unknown.event")
 }
 
-func (s *TopicRouterSuite) TestHandle_IgnoresUnknownTopicWhenConfigured() {
+func (s *EventTypeRouterSuite) TestHandle_IgnoresUnknownEventTypeWhenConfigured() {
 	// Arrange
-	router := NewTopicRouter()
-	router.SetUnknownTopicBehavior(UnknownTopicIgnore)
-	router.RegisterFunc("known.topic", func(ctx context.Context, msg *SQSMessage) error {
+	router := NewEventTypeRouter()
+	router.SetUnknownEventTypeBehavior(UnknownEventTypeIgnore)
+	router.RegisterFunc("known.event", func(ctx context.Context, msg *SQSMessage) error {
 		return errors.New("should not be called")
 	})
 
 	// Act
-	err := router.Handle(context.Background(), &SQSMessage{Topic: "unknown.topic"})
+	err := router.Handle(context.Background(), &SQSMessage{EventType: "unknown.event"})
 
 	// Assert
 	assert.NoError(s.T(), err) // Silently ignores when configured
 }
 
-func (s *TopicRouterSuite) TestHandle_PropagatesHandlerError() {
+func (s *EventTypeRouterSuite) TestHandle_PropagatesHandlerError() {
 	// Arrange
-	router := NewTopicRouter()
+	router := NewEventTypeRouter()
 	expectedErr := errors.New("handler error")
 
-	router.RegisterFunc("test.topic", func(ctx context.Context, msg *SQSMessage) error {
+	router.RegisterFunc("test.event", func(ctx context.Context, msg *SQSMessage) error {
 		return expectedErr
 	})
 
 	// Act
-	err := router.Handle(context.Background(), &SQSMessage{Topic: "test.topic"})
+	err := router.Handle(context.Background(), &SQSMessage{EventType: "test.event"})
 
 	// Assert
 	assert.ErrorIs(s.T(), err, expectedErr)
 }
 
-func (s *TopicRouterSuite) TestHandle_PropagatesFallbackError() {
+func (s *EventTypeRouterSuite) TestHandle_PropagatesFallbackError() {
 	// Arrange
-	router := NewTopicRouter()
+	router := NewEventTypeRouter()
 	expectedErr := errors.New("fallback error")
 
 	router.SetFallback(HandlerFunc(func(ctx context.Context, msg *SQSMessage) error {
@@ -213,7 +213,7 @@ func (s *TopicRouterSuite) TestHandle_PropagatesFallbackError() {
 	}))
 
 	// Act
-	err := router.Handle(context.Background(), &SQSMessage{Topic: "unknown.topic"})
+	err := router.Handle(context.Background(), &SQSMessage{EventType: "unknown.event"})
 
 	// Assert
 	assert.ErrorIs(s.T(), err, expectedErr)
@@ -246,7 +246,7 @@ func (s *TypedHandlerSuite) TestTypedHandler_UnmarshalsPayload() {
 
 	msg := &SQSMessage{
 		MessageID: "test-msg-id",
-		Topic:     "test.topic",
+		EventType: "test.event",
 		Body:      json.RawMessage(`{"name":"test","value":42}`),
 	}
 
@@ -255,7 +255,7 @@ func (s *TypedHandlerSuite) TestTypedHandler_UnmarshalsPayload() {
 
 	// Assert
 	assert.NoError(s.T(), err)
-	assert.Equal(s.T(), "test.topic", receivedMsg.Topic)
+	assert.Equal(s.T(), "test.event", receivedMsg.EventType)
 	assert.Equal(s.T(), "test-msg-id", receivedMsg.MessageID)
 	assert.Equal(s.T(), "test", receivedPayload.Name)
 	assert.Equal(s.T(), 42, receivedPayload.Value)
@@ -268,8 +268,8 @@ func (s *TypedHandlerSuite) TestTypedHandler_ReturnsErrorOnInvalidJSON() {
 	})
 
 	msg := &SQSMessage{
-		Topic: "test.topic",
-		Body:  json.RawMessage(`{invalid json`),
+		EventType: "test.event",
+		Body:      json.RawMessage(`{invalid json`),
 	}
 
 	// Act
@@ -292,8 +292,8 @@ func (s *TypedHandlerSuite) TestTypedHandler_PropagatesHandlerError() {
 	})
 
 	msg := &SQSMessage{
-		Topic: "test.topic",
-		Body:  json.RawMessage(`{"name":"test","value":42}`),
+		EventType: "test.event",
+		Body:      json.RawMessage(`{"name":"test","value":42}`),
 	}
 
 	// Act
@@ -313,8 +313,8 @@ func (s *TypedHandlerSuite) TestTypedHandler_WorksWithSlicePayload() {
 	})
 
 	msg := &SQSMessage{
-		Topic: "test.topic",
-		Body:  json.RawMessage(`["a","b","c"]`),
+		EventType: "test.event",
+		Body:      json.RawMessage(`["a","b","c"]`),
 	}
 
 	// Act
@@ -335,8 +335,8 @@ func (s *TypedHandlerSuite) TestTypedHandler_WorksWithMapPayload() {
 	})
 
 	msg := &SQSMessage{
-		Topic: "test.topic",
-		Body:  json.RawMessage(`{"key":"value","number":123}`),
+		EventType: "test.event",
+		Body:      json.RawMessage(`{"key":"value","number":123}`),
 	}
 
 	// Act

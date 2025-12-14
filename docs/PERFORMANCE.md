@@ -289,13 +289,13 @@ FROM outbox
 GROUP BY status;
 
 -- Check stuck messages
-SELECT id, topic, status, retry_count, created_at, updated_at, error_message
+SELECT id, event_type, status, retry_count, created_at, updated_at, error_message
 FROM outbox
 WHERE status = 'PUBLISHING' AND updated_at < NOW() - INTERVAL '5 minutes'
 LIMIT 10;
 
 -- Check failed messages
-SELECT id, topic, retry_count, max_retries, next_retry_at, error_message
+SELECT id, event_type, retry_count, max_retries, next_retry_at, error_message
 FROM outbox
 WHERE status = 'FAILED'
 ORDER BY created_at DESC
