@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Documentation Structure
+
+This CLAUDE.md file provides developer guidance and operational details for working with the o4x codebase.
+
+**For complete documentation:**
+- **[README.md](README.md)** - User-facing documentation, Quick Start, basic usage
+- **[docs/idempotency.md](docs/idempotency.md)** - Detailed idempotency patterns, decision tree, and implementation examples
+- **[docs/deployment.md](docs/deployment.md)** - Schema evolution, Expand-Contract pattern, deployment strategies
+
 ## Table of Contents
 
 1. [What is o4x](#what-is-o4x)
@@ -235,13 +244,54 @@ publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
 
 SQS provides at-least-once delivery, so handlers must be idempotent.
 
-**CRITICAL: External APIs Without Idempotency Support**
+**CRITICAL: External APIs Without Idempotency Support - MANDATORY REQUIREMENT**
 
-If the external API does **NOT** support idempotency:
-- ❌ **Do NOT use asynchronous messaging for that operation**
-- ✅ **Handle it synchronously instead**
+If your consumer handler calls an external API, that API **MUST** support idempotency keys.
 
-At-least-once delivery guarantees mean duplicate calls WILL happen. Without idempotency keys, you cannot prevent duplicate charges, duplicate emails, or duplicate state changes in the external system.
+This is **NOT** a recommendation. This is a **REQUIREMENT**.
+
+**Rule: No idempotency support = No async messaging**
+
+At-least-once delivery guarantees mean:
+- Handlers MAY crash after calling the API but before acknowledgment
+- Messages WILL be delivered more than once
+- The same API call WILL execute multiple times
+
+Without idempotency keys, async processing **MUST NOT** be used.
+
+**What will happen without idempotency keys:**
+- ❌ Duplicate payment charges (financial loss)
+- ❌ Duplicate email sends (customer complaints)
+- ❌ Duplicate state changes (data corruption)
+- ❌ Duplicate resource creation (inconsistent state)
+
+**Required API Capabilities:**
+- ✅ API accepts idempotency key header/parameter
+- ✅ API deduplicates requests with same key
+- ✅ API returns same response for duplicate requests
+
+**Example: Passing message_id as idempotency key**
+
+```go
+handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
+    var event PaymentEvent
+    json.Unmarshal(msg.Body, &event)
+
+    // REQUIRED: Pass message_id as idempotency key to external API
+    params := &stripe.ChargeParams{
+        Amount:   stripe.Int64(event.Amount),
+        Currency: stripe.String("usd"),
+    }
+    params.SetIdempotencyKey(msg.MessageID) // CRITICAL: Use msg.MessageID
+
+    charge, err := client.Charges.New(params)
+    if err != nil {
+        return err // Will retry
+    }
+
+    return nil
+})
+```
 
 #### Decision Tree
 
@@ -273,16 +323,49 @@ At-least-once delivery guarantees mean duplicate calls WILL happen. Without idem
 6. Monitor stuck messages in 'processing' status (indicates handler crashes)
 7. **Important**: Return `nil` on duplicates, not an error
 
+**consumer_name Definition**
+
+The `consumer_name` parameter in `InboxRepository.TryStart()` is a **logical consumer identity** at the service or consumer-group level.
+
+**What consumer_name IS:**
+- Logical service name (e.g., "order-service", "notification-service")
+- Deployment unit identifier (e.g., "payment-processor-v2")
+- Consumer group identity shared across all instances
+
+**What consumer_name is NOT:**
+- ❌ Handler function name
+- ❌ Event type name
+- ❌ Struct name
+- ❌ Per-handler identifier
+
+**Key Rules:**
+- Use the same `consumer_name` for all instances of the same service
+- Do NOT change `consumer_name` casually - it affects idempotency tracking
+- Changing `consumer_name` causes messages to be treated as new (duplicate processing)
+
+**Example:**
+
+```go
+// CORRECT: All instances use same consumer_name
+ok, _ := inboxRepo.TryStart(ctx, "order-service", msg.MessageID)
+
+// WRONG: Different consumer_name per handler
+ok, _ := inboxRepo.TryStart(ctx, "OrderCreatedHandler", msg.MessageID) // ❌
+ok, _ := inboxRepo.TryStart(ctx, msg.EventType, msg.MessageID)         // ❌
+```
+
 #### InboxRepository Implementation Notes
 
-**IMPORTANT: TryStart is NOT Exclusive Locking**
+**CRITICAL: TryStart is NOT Exclusive**
 
-`TryStart()` **does not provide exclusive or mutual exclusion semantics**.
+`TryStart()` does NOT provide exclusivity or mutual exclusion semantics.
 
-Multiple consumer workers may pass `TryStart()` concurrently for the same message.
-This is an intentional design choice.
+Multiple consumer workers MAY pass `TryStart()` concurrently for the same message.
 
-- `TryStart()` is an **optimistic gate**, not a lock
+This behavior is intentional and correct. Handlers MUST be safe to run multiple times.
+
+**Why This Design:**
+- Primary control: SQS visibility timeout prevents concurrent processing
 - The inbox table represents **completed messages only**
 - In-flight processing is controlled by the message broker (e.g. SQS visibility timeout)
 - The only definitive point is `Complete()`
@@ -292,24 +375,15 @@ TryStart   : optimistic check (may pass concurrently)
 Complete   : final commit (single source of truth)
 ```
 
-**Defense in Depth Design:**
-- **Primary control**: SQS visibility timeout prevents concurrent processing
-- **Secondary control**: DB `FOR UPDATE NOWAIT` guards against misconfiguration
+**Implementation:**
+- `TryStart`: Simple `SELECT EXISTS` check (no locking)
+- `Complete`: `INSERT ... ON CONFLICT DO NOTHING` (idempotent)
+- Returns `true` if NOT exists (proceed), `false` if exists (skip)
 - Both `pgx` and `gorm` implementations use identical logic for consistency
 
-**Concurrent Processing Prevention:**
-1. **New message**: INSERT succeeds → Worker proceeds
-2. **Duplicate (COMPLETED)**: Lock acquired → Returns `false` (skip)
-3. **Recent PROCESSING** (age < threshold): Lock acquired → Returns `false` (another worker handling)
-4. **Stuck PROCESSING** (age > threshold): Lock acquired → Returns `true` (crash recovery)
-5. **Lock conflict**: `lock_not_available` (55P03) → Returns `false` (concurrent prevention)
+**Note:** The inbox table intentionally records completed messages only.
 
-**Why both layers?**
-- SQS visibility timeout handles normal cases (99.9%)
-- DB NOWAIT catches edge cases (slow handlers, timeout misconfiguration)
-- Result: Zero duplicate processing even with configuration errors
-
-→ **For complete code examples and detailed implementation patterns**, see [README.md Idempotency section](README.md#idempotency)
+→ **For complete idempotency patterns, code examples, and decision tree**, see [docs/idempotency.md](docs/idempotency.md)
 
 ### MessageConcurrency
 

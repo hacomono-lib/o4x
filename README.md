@@ -63,6 +63,19 @@ flowchart LR
     Handler -.->|"idempotency (optional)"| CDB
 ```
 
+### Event Type Routing
+
+**CRITICAL CLARIFICATION:**
+
+In o4x, `event_type` is a **logical routing key**, NOT a broker-level topic (SNS/Kafka).
+
+o4x does NOT support fan-out by design. Each message is delivered to exactly one consumer (point-to-point pattern).
+
+- **Event-Type-based Routing**: Different event types → different handlers (1 event_type → 1 handler)
+- **Fan-Out**: Same event → multiple handlers (1 message → N handlers) - **NOT SUPPORTED**
+
+For fan-out patterns, use SNS + multiple SQS queues OR Kinesis/Kafka instead.
+
 ### 1. Outbox (Publisher Side)
 
 The core outbox pattern implementation. Your application inserts messages into the `outbox` table within the same database transaction as your business logic. The Dispatcher polls for pending messages and publishes them to SQS.
@@ -90,55 +103,13 @@ stateDiagram-v2
 
 **Operational actions:**
 - **FAILED**: Usually auto-recovers via RequeueFailed. Check `error_message` for network/auth issues. Reset retry count if needed: `UPDATE outbox SET retry_count = 0 WHERE id = '...'`
-- **DEAD**: Alert immediately. Query cause: `SELECT id, event_type, error_message, payload FROM outbox WHERE status = 'DEAD'`. Options: (1) Fix payload and re-enqueue, (2) Manual publish to SQS, (3) Archive/delete if invalid. See CLAUDE.md for detailed recovery procedures.
+- **DEAD**: Alert immediately. Query cause: `SELECT id, event_type, error_message, payload FROM outbox WHERE status = 'DEAD'`. Options: (1) Fix payload and re-enqueue, (2) Manual publish to SQS, (3) Archive/delete if invalid.
 
 ### 2. Consumer (SQS-specific, Optional)
 
 An optional component for processing SQS messages. Handlers must be **idempotent** since SQS provides at-least-once delivery.
 
-**Idempotency Options:**
-
-1. **InboxRepository (Recommended)** - Transactional Inbox pattern via `consumer_inbox` table
-   - ✅ Database-level guarantee with composite primary key `(consumer_name, message_id)`
-   - ✅ Simple API: `TryStart()` and `Complete()`
-   - ✅ Race-safe, handles retries correctly
-   - See [CLAUDE.md](CLAUDE.md) for detailed usage patterns
-
-2. **Application-Level** - Custom idempotency in your handler
-   - `ON CONFLICT (message_id) DO NOTHING` in business tables
-   - Redis cache with `SetNX`
-   - Business data checks
-
 **Note:** The consumer is SQS-specific and located at `contrib/sqs/consumer`. If you use Kafka or other message brokers, they typically manage consumption state internally (e.g., Kafka offsets).
-
-#### Handler Flow
-
-```mermaid
-stateDiagram-v2
-    [*] --> Receive: SQS delivers message
-    Receive --> CheckIdempotency: InboxRepository.TryStart()
-    CheckIdempotency --> Skip: Already completed
-    CheckIdempotency --> Process: First time or retry
-    Process --> Complete: Handler success
-    Process --> Retry: Handler error
-    Complete --> DeleteSQS: Mark completed
-    Retry --> [*]: SQS redelivers after visibility timeout
-    Skip --> DeleteSQS: Already processed
-    DeleteSQS --> [*]
-```
-
-**Common scenarios:**
-- **Normal flow**: Receive from SQS → TryStart (true) → Handler succeeds → Complete → Delete from SQS
-- **Duplicate**: Receive from SQS → TryStart (false, already completed) → Skip → Delete from SQS
-- **Retry**: Receive from SQS → TryStart (true, status=processing) → Handler fails → SQS redelivers → Retry
-- **Max retries**: Handler fails repeatedly → SQS deletes message (configure DLQ to preserve)
-
-**Operational actions:**
-- **Handler failures**: Check handler logs and fix bugs. SQS auto-retries via visibility timeout.
-- **Max retries exceeded**: Configure SQS Dead Letter Queue (DLQ) to preserve failed messages. Use `OnMessageDead` hook for custom handling.
-- **Stuck processing**: Messages with `status=processing` in `consumer_inbox` will naturally retry when SQS redelivers.
-
-**Important:** Consumer never updates the outbox table. Outbox and Consumer are completely independent.
 
 ## Quick Start
 
@@ -218,7 +189,7 @@ The `Metadata` field (JSONB) can store additional context that travels with the 
 
 ### 3. Run the Dispatcher
 
-**Standard Dispatcher (1 message at a time):**
+**Batch Dispatcher (recommended for high throughput):**
 
 ```go
 import (
@@ -227,29 +198,6 @@ import (
     "github.com/hacomono-lib/o4x/contrib/sqs"
 )
 
-// Create publisher
-publisher := sqs.NewPublisher(sqsClient, queueURL)
-
-// Create repository
-repo := pgx.NewOutboxRepository(pool)
-
-// Create and start dispatcher
-dispatcher := core.NewDispatcher(repo, publisher, core.DispatcherConfig{
-    PollInterval: 100 * time.Millisecond,
-    WorkerCount:  4,
-})
-
-if err := dispatcher.Start(ctx); err != nil {
-    log.Fatal(err)
-}
-
-// Graceful shutdown
-dispatcher.Stop()
-```
-
-**Batch Dispatcher (high throughput):**
-
-```go
 // Create batch publisher
 publisher := sqs.NewBatchPublisher(sqsClient, queueURL)
 
@@ -265,6 +213,21 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, core.BatchDispatcherConfi
 })
 
 dispatcher.Start(ctx)
+```
+
+**Standard Dispatcher (1 message at a time):**
+
+```go
+publisher := sqs.NewPublisher(sqsClient, queueURL)
+repo := pgx.NewOutboxRepository(pool)
+
+dispatcher := core.NewDispatcher(repo, publisher, core.DispatcherConfig{
+    PollInterval: 100 * time.Millisecond,
+    WorkerCount:  4,
+})
+
+dispatcher.Start(ctx)
+dispatcher.Stop() // Graceful shutdown
 ```
 
 ### 4. Run the Consumer (Optional)
@@ -313,12 +276,12 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 
 ### Event Type Router
 
-Route messages to different handlers based on event type. EventTypeRouter provides two registration methods:
+Route messages to different handlers based on event type:
 
 ```go
 router := consumer.NewEventTypeRouter()
 
-// 1. RegisterFunc - Register inline handler functions for specific event types
+// Register inline handler functions for specific event types
 router.RegisterFunc("order.created", func(ctx context.Context, msg *consumer.SQSMessage) error {
     // Handle order.created events
     return nil
@@ -329,7 +292,7 @@ router.RegisterFunc("user.registered", func(ctx context.Context, msg *consumer.S
     return nil
 })
 
-// 2. Register - Register Handler interface implementations
+// Register Handler interface implementations
 type OrderHandler struct {
     db *sql.DB
 }
@@ -341,7 +304,7 @@ func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) err
 
 router.Register("order.shipped", &OrderHandler{db: db})
 
-// 3. SetFallback - Handle unknown event types (optional but recommended)
+// Set fallback for unknown event types (optional but recommended)
 router.SetFallback(consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
     log.Printf("unhandled event_type: %s", msg.EventType)
     return nil  // Return nil to acknowledge, error to retry
@@ -369,7 +332,7 @@ type OrderCreatedEvent struct {
 
 // Create typed handler
 orderHandler := consumer.NewTypedHandler(func(ctx context.Context, msg *consumer.SQSMessage, event OrderCreatedEvent) error {
-    log.Printf("Order %s created for user %s, amount=%d (msgID=%s)", event.OrderID, event.UserID, event.Amount, msg.MessageID)
+    log.Printf("Order %s created for user %s, amount=%d", event.OrderID, event.UserID, event.Amount)
     return nil
 })
 
@@ -378,201 +341,261 @@ router := consumer.NewEventTypeRouter()
 router.Register("order.created", orderHandler)
 ```
 
-### Custom Handler Implementation
-
-Implement the `Handler` interface for complex scenarios:
-
-```go
-type MyHandler struct {
-    db     *sql.DB
-    cache  *redis.Client
-    logger *slog.Logger
-}
-
-func (h *MyHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    // Access injected dependencies
-    h.logger.Info("processing message", "event_type", msg.EventType)
-
-    // Implement idempotency check
-    if h.cache.Exists(ctx, msg.IdempotencyKey).Val() {
-        return nil // Already processed
-    }
-
-    // Process message...
-
-    return nil
-}
-
-// Use custom handler
-handler := &MyHandler{db: db, cache: cache, logger: logger}
-svc := consumer.NewService(sqsClient, handler, config)
-```
-
 ## Idempotency
 
-### Publisher Side (Outbox)
+### CRITICAL: External APIs Without Idempotency Support
 
-o4x provides **at-least-once delivery** with strong consistency guarantees:
-- Transactional writes (message + business logic in same transaction)
-- Idempotency keys prevent duplicate insertions within the outbox table
-- Status transitions track publishing state (ENQUEUED → PUBLISHING → PUBLISHED)
-- **Note**: Due to crash recovery edge cases, messages may be published more than once to SQS
+If your consumer handler calls an external API, that API **MUST** support idempotency keys.
 
-### Consumer Side
+This is **NOT** a recommendation. This is a **REQUIREMENT**.
 
-💡 **For decision tree guidance**, see [CLAUDE.md Idempotency Strategy](CLAUDE.md#idempotency-strategy)
+**Rule: No idempotency support = No async messaging**
 
-**IMPORTANT:** You must implement idempotency in your message handlers!
+At-least-once delivery guarantees mean:
+- Handlers MAY crash after calling the API but before acknowledgment
+- Messages WILL be delivered more than once
+- The same API call WILL execute multiple times
 
-**CRITICAL: External APIs Without Idempotency Support**
+Without idempotency keys, async processing **MUST NOT** be used.
 
-If your handler calls an external API that does **NOT** support idempotency keys:
-- ❌ **Do NOT use asynchronous messaging for that operation**
-- ✅ **Handle it synchronously instead**
-
-Why? At-least-once delivery guarantees mean duplicate calls WILL occur. Without idempotency keys, you cannot prevent:
-- Duplicate payment charges
-- Duplicate email sends
-- Duplicate state changes in the external system
-- Duplicate resource creation
-
-**Examples:**
-- ✅ Stripe API with `Idempotency-Key` header → Safe to use async
-- ❌ Legacy payment gateway without idempotency support → Must use sync calls
-- ❌ SendGrid Mail Send API (no idempotency support) → Must use sync calls or implement application-level deduplication
-- ❌ Simple SMTP email without deduplication → Must use sync calls
-- ✅ Twilio API with idempotency support → Safe to use async
-- ✅ Shopify Admin API with `X-Shopify-Access-Token` → Safe to use async
-
-Both o4x and SQS guarantee **at-least-once delivery**. This means your consumer may receive the same message multiple times in these scenarios:
-
-- Message processing takes longer than visibility timeout
-- Consumer crashes after processing but before ACK
-- Network issues during message deletion
-- SQS internal retries
-
-#### Recommended Approaches
-
-**1. Use IdempotencyKey with Cache/Database**
+**Example: Stripe Payment**
 
 ```go
-type IdempotentHandler struct {
-    cache  *redis.Client
-    logger *slog.Logger
-}
+handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
+    var event PaymentEvent
+    json.Unmarshal(msg.Body, &event)
 
-func (h *IdempotentHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    // Check if already processed
-    key := fmt.Sprintf("processed:%s", msg.IdempotencyKey)
-    exists, _ := h.cache.Exists(ctx, key).Result()
-    if exists > 0 {
-        h.logger.Info("message already processed, skipping", "key", msg.IdempotencyKey)
-        return nil // Return success to ACK the message
+    // REQUIRED: Pass message_id as idempotency key
+    params := &stripe.ChargeParams{
+        Amount:   stripe.Int64(event.Amount),
+        Currency: stripe.String("usd"),
     }
+    params.SetIdempotencyKey(msg.MessageID) // CRITICAL
 
-    // Process message
-    if err := h.processMessage(ctx, msg); err != nil {
-        return err // Will retry
-    }
-
-    // Mark as processed (with TTL to auto-cleanup)
-    h.cache.Set(ctx, key, "1", 7*24*time.Hour)
-    return nil
-}
-```
-
-**2. Use Database Unique Constraint**
-
-```go
-func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    // Try to insert with unique constraint on idempotency_key
-    _, err := h.db.Exec(ctx,
-        "INSERT INTO processed_messages (idempotency_key, processed_at) VALUES ($1, NOW())",
-        msg.IdempotencyKey,
-    )
-    
-    if isDuplicateKeyError(err) {
-        // Already processed
-        return nil
-    }
+    charge, err := client.Charges.New(params)
     if err != nil {
         return err
     }
-
-    // Process message...
-    return h.processMessage(ctx, msg)
-}
+    return nil
+})
 ```
 
-**3. Use InboxRepository (Transactional Inbox Pattern)**
+→ **For detailed idempotency patterns and decision tree**, see [docs/idempotency.md](docs/idempotency.md)
 
-**IMPORTANT:** `TryStart()` is NOT an exclusive lock. Multiple workers may call it concurrently for the same message. It's an **optimistic gate**, not mutual exclusion. The inbox table represents **completed messages only**. In-flight processing is controlled by the message broker (SQS visibility timeout). The only definitive point is `Complete()`.
+### InboxRepository (Recommended)
+
+#### consumer_name Definition
+
+The `consumer_name` parameter is a **logical consumer identity** at the service or consumer-group level.
+
+**What consumer_name IS:**
+- Logical service name (e.g., "order-service", "notification-service")
+- Deployment unit identifier (e.g., "payment-processor-v2")
+- Consumer group identity shared across all instances
+
+**What consumer_name is NOT:**
+- ❌ Handler function name
+- ❌ Event type name
+- ❌ Struct name
+- ❌ Per-handler identifier
 
 ```go
-// Use InboxRepository for database-level idempotency with transaction support
+// CORRECT: All instances use same consumer_name
+ok, _ := inboxRepo.TryStart(ctx, "order-service", msg.MessageID)
+
+// WRONG: Different consumer_name per handler
+ok, _ := inboxRepo.TryStart(ctx, "OrderCreatedHandler", msg.MessageID) // ❌
+```
+
+#### CRITICAL: TryStart is NOT Exclusive
+
+**`TryStart()` does NOT provide exclusivity or mutual exclusion semantics.**
+
+Multiple consumer workers MAY pass `TryStart()` concurrently for the same message.
+
+This behavior is intentional and correct. Handlers MUST be safe to run multiple times.
+
+**Why This Design:**
+- Primary control: SQS visibility timeout prevents concurrent processing
+- The inbox table represents **completed messages only**
+- In-flight processing is controlled by the message broker (SQS visibility timeout)
+- The only definitive point is `Complete()`
+
+```text
+TryStart   : optimistic check (may pass concurrently)
+Complete   : final commit (single source of truth)
+```
+
+#### Pattern: Transaction Support
+
+Use when you need atomicity between idempotency check and business logic:
+
+```go
 inboxRepo := pgx.NewInboxRepository(pool)
 
 handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
     tx, _ := db.Begin(ctx)
     defer tx.Rollback(ctx)
 
-    // Check idempotency (within transaction)
-    // NOTE: TryStart is an optimistic check, not an exclusive lock
+    // Check idempotency (optimistic check, NOT a lock)
     inboxTx := inboxRepo.WithTx(tx)
-    ok, _ := inboxTx.TryStart(ctx, "HandlerName", msg.MessageID)
+    ok, _ := inboxTx.TryStart(ctx, "order-service", msg.MessageID)
     if !ok {
         return nil // Already processed
     }
 
     // Process message (same transaction)
-    // ... business logic ...
+    tx.Exec(ctx, "INSERT INTO orders ...")
 
     // Mark completed (single source of truth)
-    inboxTx.Complete(ctx, "HandlerName", msg.MessageID)
+    inboxTx.Complete(ctx, "order-service", msg.MessageID)
 
     return tx.Commit(ctx)
 })
-
-// Benefits:
-// - Atomic idempotency check with business logic
-// - Race-safe duplicate detection via (consumer_name, message_id) primary key
-// - Audit trail: Processing status and timestamps
-// - See CLAUDE.md for detailed usage patterns
-
-// Key Concepts:
-// TryStart   : optimistic check (may pass concurrently)
-// Complete   : final commit (single source of truth)
 ```
 
-**4. Make Operations Idempotent**
+**Key Concepts:**
+- Inbox records completed messages only
+- `TryStart` is an optimistic check
+- `Complete` is the single source of truth
+- Race-safe duplicate detection via `(consumer_name, message_id)` primary key
 
-Design your business logic to be naturally idempotent:
+→ **For complete idempotency patterns, decision tree, and best practices**, see [docs/idempotency.md](docs/idempotency.md)
+
+## SQS Queue Types
+
+o4x supports both Standard and FIFO SQS queues.
+
+### Standard Queue (Recommended for most use cases)
 
 ```go
-// Instead of: balance += amount (NOT idempotent)
-// Use: UPDATE accounts SET balance = $1 WHERE id = $2 (idempotent with final state)
-
-// Instead of: INSERT INTO ... (may fail on duplicate)
-// Use: INSERT INTO ... ON CONFLICT DO NOTHING (idempotent)
+publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue")
 ```
 
-#### Best Practices
+- ✅ Higher throughput (nearly unlimited)
+- ✅ Lower cost
+- ❌ No ordering guarantee
+- ❌ Possible duplicate delivery
+- **Use for:** Independent events, notifications, logs, analytics
 
-- **Always check IdempotencyKey** before processing
-- **External APIs without idempotency support**: Do NOT use async messaging - handle synchronously instead ⛔
-- **External APIs with idempotency support**: Pass `msg.MessageID` or `msg.IdempotencyKey` to the API
-- **Use TTL for cleanup** - Processed keys don't need to live forever (7-30 days is typical)
-- **Return nil for duplicates** - To ACK the message and remove it from the queue
-- **Log duplicate detections** - For monitoring and debugging
-- **Test duplicate scenarios** - Simulate message redelivery in your tests
+### FIFO Queue (Use when ordering matters)
+
+```go
+publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue.fifo")
+```
+
+- ✅ Ordering guarantee (per MessageGroupId = event_type)
+- ✅ Deduplication (5-minute window)
+- ❌ Lower throughput (300-3,000 msg/sec)
+- ❌ Higher cost
+- **Use for:** Order workflows, payment processing, inventory updates
+
+**Important**: Regardless of queue type, your consumer handlers must be idempotent.
+
+### Message Size Limits
+
+**SQS enforces a hard limit of 256 KB per message.**
+
+o4x automatically validates message sizes before publishing:
+- Messages exceeding 256 KB are **immediately marked as DEAD** (PermanentError)
+- No automatic retry for oversized messages (would fail again)
+
+**Best Practices:**
+- Keep payloads small - store large data in S3/database, send references in messages
+- If you need >256 KB, use [SQS Extended Client](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-s3-messages.html) pattern
+
+### Multiple Queues (Event-Type-based Routing)
+
+For advanced use cases, route event types to different queues:
+
+```go
+import "github.com/hacomono-lib/o4x/contrib/sqs"
+
+// Create event-type-to-queue router with a default queue
+router := sqs.NewTopicQueueMap("https://sqs.../default-queue")
+
+// Exact event type match (highest priority)
+router.Register("order.created", "https://sqs.../orders-queue.fifo")
+router.Register("payment.completed", "https://sqs.../payments-queue.fifo")
+
+// Prefix-based routing (checked after exact matches)
+router.RegisterPrefix("notification.", "https://sqs.../notifications-queue")
+router.RegisterPrefix("log.", "https://sqs.../logs-queue")
+
+// Create multi-queue publisher
+publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
+
+// Use with dispatcher
+dispatcher := core.NewBatchDispatcher(repo, publisher, config)
+```
+
+**Routing Priority:**
+1. Exact event type match via `Register()` (highest priority)
+2. Prefix match via `RegisterPrefix()` (checked in registration order)
+3. Default queue (specified in `NewTopicQueueMap`)
+
+**When to use multiple queues:**
+- Different event types have different ordering requirements (FIFO vs Standard)
+- Different event types have different throughput requirements
+- Different teams own different event type consumers
+- Isolation between critical and non-critical events
+
+## Configuration
+
+### Dispatcher Config
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `PollInterval` | 100ms | How often to poll for new messages |
+| `MaxPollInterval` | 3200ms | Maximum polling interval during idle periods |
+| `WorkerCount` | 1 | Number of concurrent workers |
+| `AutoRecover` | true | Automatic recovery of stuck PUBLISHING messages at startup |
+| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. If 0, FAILED messages will not retry automatically |
+| `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |
+| `ForceTimeout` | 60s | Hard limit before forceful exit |
+| `CleanupTimeout` | 10s | Timeout for database cleanup operations during shutdown |
+
+### BatchDispatcher Config
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `PollInterval` | 100ms | How often to poll for new messages |
+| `BatchSize` | 10 | Messages per batch (max 10 for SQS) |
+| `WorkerCount` | 1 | Number of concurrent batch workers |
+| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. If 0, FAILED messages will not retry automatically |
+| `RequeueBackoffBase` | 1s | Base interval for exponential backoff on retry |
+| `RequeueBackoffMax` | 1h | Maximum backoff interval (caps exponential growth) |
+| `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |
+| `ForceTimeout` | 60s | Hard limit before forceful exit |
+
+**Exponential backoff formula:** `RequeueBackoffBase * 2^retry_count`, capped at `RequeueBackoffMax`
+
+### Consumer Config
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `QueueURL` | (required) | SQS queue URL |
+| `MaxNumberOfMessages` | 10 | Messages per poll |
+| `WaitTimeSeconds` | 20 | Long polling wait time |
+| `VisibilityTimeout` | 30 | SQS visibility timeout |
+| `MaxRetries` | 5 | Max processing attempts |
+| `WorkerCount` | 1 | Number of concurrent workers |
+| `MessageConcurrency` | 1 | Messages processed concurrently per worker (>1 only for Standard queues) |
+| `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |
+| `ForceTimeout` | 60s | Hard limit before forceful exit |
+
+**MessageConcurrency:**
+- Controls parallel message processing within each worker
+- **Standard queues**: Can use any value (e.g., 10 for 10x parallelism)
+- **FIFO queues**: Must be 1 (parallel processing breaks ordering guarantees)
+- **Total parallelism**: `WorkerCount * MessageConcurrency`
+- **Use when**: Fast handlers (<100ms), high throughput needs, I/O-bound operations
 
 ## Maintenance
 
 ### Cleanup Old Messages
 
 Over time, your outbox and consumer tables will accumulate old messages. Use `DeleteOlderThan` to clean them up periodically.
-
-#### Cleanup Script Example
 
 ```go
 import (
@@ -585,7 +608,6 @@ func CleanupOldMessages(ctx context.Context) error {
     repo := pgx.NewOutboxRepository(pool)
 
     // Delete PUBLISHED messages older than 7 days
-    // Note: DeleteOlderThan uses PostgreSQL interval format internally for reliable cleanup
     publishedCount, err := repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 7*24*time.Hour)
     if err != nil {
         return fmt.Errorf("failed to delete PUBLISHED messages: %w", err)
@@ -603,286 +625,31 @@ func CleanupOldMessages(ctx context.Context) error {
 }
 ```
 
-#### Automated Cleanup with Cron
-
-```go
-import (
-    "github.com/robfig/cron/v3"
-)
-
-func StartCleanupScheduler(ctx context.Context) {
-    c := cron.New()
-    
-    // Run cleanup daily at 2 AM
-    c.AddFunc("0 2 * * *", func() {
-        if err := CleanupOldMessages(ctx); err != nil {
-            log.Printf("cleanup failed: %v", err)
-        }
-    })
-    
-    c.Start()
-}
-```
-
-#### Recommended Retention Policies
+**Recommended Retention Policies:**
 
 | Status | Recommended Retention | Reason |
 |--------|----------------------|--------|
-| `PUBLISHED` | 7-30 days | For audit/debugging, can be deleted after verification period |
-| `DEAD` | 30-90 days | Keep longer for investigation, these are failed messages |
+| `PUBLISHED` | 7-30 days | For audit/debugging |
+| `DEAD` | 30-90 days | Keep longer for investigation |
 | `ENQUEUED` | N/A | Don't delete, these are pending messages |
 | `PUBLISHING` | N/A | Should be transient, use `ReviveStuckPublishing()` instead |
 | `FAILED` | N/A | Should be auto-retried or moved to DEAD |
 
-#### Consumer Inbox Cleanup
+**Consumer Inbox Cleanup:**
 
 ```go
 inboxRepo := pgx.NewInboxRepository(pool)
 
-// Delete completed inbox messages older than 7 days
 completedCount, err := inboxRepo.DeleteOlderThan(ctx, 7*24*time.Hour)
-if err != nil {
-    return fmt.Errorf("failed to delete inbox messages: %w", err)
-}
 log.Printf("Deleted %d inbox messages", completedCount)
 ```
-
-#### Monitoring Cleanup
-
-```go
-func CleanupWithMetrics(ctx context.Context) error {
-    repo := pgx.NewOutboxRepository(pool)
-    
-    // Count before cleanup
-    var beforeCount int64
-    db.QueryRow("SELECT COUNT(*) FROM outbox WHERE status = 'PUBLISHED'").Scan(&beforeCount)
-    
-    // Cleanup
-    deletedCount, err := repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 7*24*time.Hour)
-    if err != nil {
-        return err
-    }
-    
-    // Report metrics
-    metrics.RecordOutboxCleanup("PUBLISHED", deletedCount)
-    log.Printf("Cleaned up %d/%d PUBLISHED messages", deletedCount, beforeCount)
-    
-    return nil
-}
-```
-
-## Configuration
-
-### Dispatcher Config
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `PollInterval` | 100ms | How often to poll for new messages |
-| `MaxPollInterval` | 3200ms (PollInterval * 32) | Maximum polling interval during idle periods |
-| `WorkerCount` | 1 | Number of concurrent workers |
-| `AutoRecover` | true | Automatic recovery of stuck PUBLISHING messages at startup |
-| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. Important: If 0, FAILED messages will not retry automatically |
-| `ShutdownTimeout` | 30s | Time to wait for graceful shutdown (context respected) |
-| `ForceTimeout` | 60s | Hard limit before forceful exit |
-| `CleanupTimeout` | 10s | Timeout for database cleanup operations during shutdown |
-
-**Graceful Shutdown**: Worker and BatchDispatcher respect context cancellation. Cleanup operations (UpdateToPublished, UpdateToFailed) use derived context with 10s timeout to allow DB updates while respecting cancellation signals.
-
-### BatchDispatcher Config
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `PollInterval` | 100ms | How often to poll for new messages |
-| `BatchSize` | 10 | Messages per batch (max 10 for SQS) |
-| `WorkerCount` | 1 | Number of concurrent batch workers |
-| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. Important: If 0, FAILED messages will not retry automatically |
-| `RequeueBackoffBase` | 1s | Base interval for exponential backoff on retry |
-| `RequeueBackoffMax` | 1h | Maximum backoff interval (caps exponential growth) |
-| `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |
-| `ForceTimeout` | 60s | Hard limit before forceful exit |
-
-**Important Notes**:
-- **RequeueInterval default changed from 0 to 10s** - Previously FAILED messages never retried automatically
-- Exponential backoff formula: `RequeueBackoffBase * 2^retry_count`, capped at `RequeueBackoffMax`
-- For high-priority messages, use `RequeueInterval: 1*time.Second`
-- For low-priority/cost-sensitive workloads, use `RequeueInterval: 60*time.Second`
-
-### Consumer Config
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `QueueURL` | (required) | SQS queue URL |
-| `MaxNumberOfMessages` | 10 | Messages per poll |
-| `WaitTimeSeconds` | 20 | Long polling wait time |
-| `VisibilityTimeout` | 30 | SQS visibility timeout |
-| `MaxRetries` | 5 | Max processing attempts |
-| `WorkerCount` | 1 | Number of concurrent workers |
-| `MessageConcurrency` | 1 | Messages processed concurrently per worker (>1 only for Standard queues) |
-| `ShutdownTimeout` | 30s | Time to wait for graceful shutdown before warning |
-| `ForceTimeout` | 60s | Hard limit before forceful exit |
-
-**MessageConcurrency** (new feature):
-- Controls parallel message processing within each worker
-- **Standard queues**: Can use any value (e.g., 10 for 10x parallelism)
-- **FIFO queues**: Must be 1 (parallel processing breaks ordering guarantees)
-- **Total parallelism**: `WorkerCount * MessageConcurrency`
-- **Example**: `WorkerCount=5, MessageConcurrency=10` → 50 messages processed simultaneously
-- **Use when**: Fast handlers (<100ms), high throughput needs, I/O-bound operations
-- **Performance tip**: Start with 5-10, monitor DB connection pool, increase based on metrics
-
-**Note**: Consumer service checks context cancellation before each polling cycle. SQS long polling (up to 20s) may delay shutdown, but context is respected during message processing.
 
 ## Repository Adapters
 
 o4x provides adapters for popular database libraries:
 
-- **[pgx](docs/pgx.md)** - `github.com/hacomono-lib/o4x/contrib/pgx` - High-performance PostgreSQL driver
-- **[GORM](docs/gorm.md)** - `github.com/hacomono-lib/o4x/contrib/gorm` - Popular ORM with PostgreSQL support
-
-See the detailed documentation for each adapter:
-- [pgx Adapter Documentation](docs/pgx.md) - Transaction support, performance tips, and examples
-- [GORM Adapter Documentation](docs/gorm.md) - ORM integration, hooks, and migration guide
-
-## Environment Variables
-
-```bash
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/mydb?sslmode=disable
-SQS_ENDPOINT=http://localhost:4566  # For LocalStack
-AWS_REGION=us-east-1
-
-# Standard Queue (high throughput, no ordering guarantee)
-SQS_QUEUE_URL=http://localhost:4566/000000000000/my-queue
-
-# FIFO Queue (ordered delivery, deduplication)
-SQS_QUEUE_URL=http://localhost:4566/000000000000/my-queue.fifo
-```
-
-## SQS Queue Types
-
-o4x supports both Standard and FIFO SQS queues. Choose based on your requirements:
-
-### Standard Queue (Recommended for most use cases)
-
-```go
-// No .fifo suffix
-publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue")
-```
-
-- ✅ Higher throughput (nearly unlimited)
-- ✅ Lower cost ($0.40 per million requests)
-- ❌ No ordering guarantee
-- ❌ Possible duplicate delivery
-- **Use for:** Independent events, notifications, logs, analytics
-
-### FIFO Queue (Use when ordering matters)
-
-```go
-// Must end with .fifo
-publisher := sqs.NewBatchPublisher(sqsClient, "https://sqs.../my-queue.fifo")
-```
-
-- ✅ Ordering guarantee (per MessageGroupId = event_type)
-- ✅ Deduplication (5-minute window via MessageDeduplicationId = idempotency_key)
-- ❌ Lower throughput (300 msg/sec per queue, 3,000 with high throughput mode)
-- ❌ Higher cost ($0.50 per million requests)
-- **Use for:** Order workflows, payment processing, inventory updates
-
-### When to use which?
-
-| Scenario | Recommended Queue Type |
-|----------|----------------------|
-| Email notifications | **Standard** - Independent, high volume |
-| User registration events | **Standard** - One-time, no ordering needed |
-| Access logs | **Standard** - Timestamp-based, very high volume |
-| Order processing (created→paid→shipped) | **FIFO** - State transitions must be ordered |
-| Payment flows (authorize→capture→refund) | **FIFO** - Operations must follow sequence |
-| Inventory updates (+10, -5, +3) | **FIFO** - Math operations are order-sensitive |
-
-**Important**: Regardless of queue type, your consumer handlers must be idempotent. See the [Idempotency](#idempotency) section.
-
-### Message Size Limits
-
-**SQS enforces a hard limit of 256 KB per message.**
-
-o4x automatically validates message sizes before publishing:
-- Messages exceeding 256 KB are **immediately marked as DEAD** (PermanentError)
-- No automatic retry for oversized messages (would fail again)
-- Validation happens at the Publisher layer to prevent wasted SQS API calls
-
-**Best Practices**:
-- Keep payloads small - store large data in S3/database, send references in messages
-- If you need >256 KB, use [SQS Extended Client](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-s3-messages.html) pattern
-- Monitor `ErrPayloadTooLarge` errors to detect oversized messages
-
-### Single Queue (Default)
-
-By default, all topics are published to a single queue:
-
-```go
-publisher := sqs.NewPublisher(sqsClient, queueURL)
-// or for batch
-publisher := sqs.NewBatchPublisher(sqsClient, queueURL)
-```
-
-### Multiple Queues (Topic-based Routing)
-
-For advanced use cases, route topics to different queues. TopicQueueMap provides two registration methods:
-
-```go
-import "github.com/hacomono-lib/o4x/contrib/sqs"
-
-// Create event-type-to-queue router with a default queue (Standard or FIFO)
-// TopicQueueMap is thread-safe and can be registered concurrently
-router := sqs.NewTopicQueueMap("https://sqs.../default-queue") // Standard
-
-// 1. Register - Exact event type match (highest priority)
-router.Register("order.created", "https://sqs.../orders-queue.fifo")
-router.Register("order.updated", "https://sqs.../orders-queue.fifo")
-router.Register("payment.completed", "https://sqs.../payments-queue.fifo")
-
-// 2. RegisterPrefix - Prefix-based routing (checked after exact matches)
-router.RegisterPrefix("notification.", "https://sqs.../notifications-queue") // Standard
-router.RegisterPrefix("log.", "https://sqs.../logs-queue") // Standard
-
-// Create multi-queue publisher
-publisher := sqs.NewMultiQueuePublisher(sqsClient, router)
-// or for batch
-publisher := sqs.NewMultiBatchPublisher(sqsClient, router)
-
-// Use with dispatcher
-dispatcher := core.NewBatchDispatcher(repo, publisher, config)
-```
-
-**Routing Priority:**
-1. Exact event type match via `Register()` (highest priority)
-2. Prefix match via `RegisterPrefix()` (checked in registration order)
-3. Default queue (specified in `NewTopicQueueMap`)
-
-**Thread Safety**: `TopicQueueMap` is safe for concurrent use. You can call `Register()`, `RegisterPrefix()`, and `QueueURL()` from multiple goroutines without external synchronization.
-
-**When to use multiple queues:**
-- Different event types have different ordering requirements (FIFO vs Standard)
-- Different event types have different throughput requirements
-- Different teams own different event type consumers
-- Event types need different retry policies (VisibilityTimeout, MaxRetries)
-- Isolation between critical and non-critical events
-
-**Example routing strategy:**
-```
-Critical workflows   → FIFO queues   (orders, payments, inventory)
-High-volume logs     → Standard      (access logs, analytics)
-Notifications        → Standard      (emails, push notifications)
-```
-
-**Custom Router:**
-
-Implement `TopicQueueRouter` for dynamic routing (e.g., from database or config service):
-
-```go
-type TopicQueueRouter interface {
-    QueueURL(eventType string) string
-}
-```
+- **[pgx](docs/pgx.md)** - High-performance PostgreSQL driver
+- **[GORM](docs/gorm.md)** - Popular ORM with PostgreSQL support
 
 ## Observability
 
@@ -901,18 +668,16 @@ hooks := &core.Hooks{
     },
     OnPublishSuccess: func(ctx context.Context, msg *core.Outbox, duration time.Duration) {
         metrics.RecordLatency("outbox.publish.latency", duration, "event_type", msg.EventType)
-        metrics.IncrCounter("outbox.publish.success", "event_type", msg.EventType)
     },
     OnPublishFailure: func(ctx context.Context, msg *core.Outbox, err error, duration time.Duration, retryable bool) {
-        metrics.IncrCounter("outbox.publish.failure", "event_type", msg.EventType, "retryable", retryable)
+        metrics.IncrCounter("outbox.publish.failure", "event_type", msg.EventType)
         if !retryable {
-            // Alert on permanent failures
             alerting.Send("Permanent publish failure", msg)
         }
     },
     OnMessageDead: func(ctx context.Context, msg *core.Outbox, err error) {
         metrics.IncrCounter("outbox.message.dead", "event_type", msg.EventType)
-        // Alert ops team, log to monitoring system, etc.
+        // Alert ops team
     },
 }
 
@@ -922,7 +687,7 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, core.BatchDispatcherConfi
 })
 ```
 
-**Available Publisher Hooks**:
+**Available Publisher Hooks:**
 - `OnPublishStart` - Before publishing a message
 - `OnPublishSuccess` - After successful publish
 - `OnPublishFailure` - On publish error (includes retryability flag)
@@ -930,49 +695,10 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, core.BatchDispatcherConfi
 - `OnBatchPublishStart` - Before publishing a batch
 - `OnBatchPublishComplete` - After batch publish (includes success/failure counts)
 
-#### Consumer Hooks
-
-Consumer also provides hooks for monitoring message consumption:
-
-```go
-import "github.com/hacomono-lib/o4x/contrib/sqs/consumer"
-
-hooks := &consumer.Hooks{
-    OnConsumeStart: func(ctx context.Context, msg *consumer.SQSMessage) {
-        metrics.IncrCounter("consumer.start", "event_type", msg.EventType)
-    },
-    OnConsumeSuccess: func(ctx context.Context, msg *consumer.SQSMessage, duration time.Duration) {
-        metrics.RecordLatency("consumer.latency", duration, "event_type", msg.EventType)
-        metrics.IncrCounter("consumer.success", "event_type", msg.EventType)
-    },
-    OnConsumeFailure: func(ctx context.Context, msg *consumer.SQSMessage, err error, duration time.Duration, retryable bool) {
-        metrics.IncrCounter("consumer.failure", "event_type", msg.EventType, "retryable", retryable)
-        if !retryable {
-            alerting.Send("Message reached max retries", msg)
-        }
-    },
-    OnMessageDead: func(ctx context.Context, msg *consumer.SQSMessage, err error) {
-        metrics.IncrCounter("consumer.message.dead", "event_type", msg.EventType)
-        // Alert ops team, log to dead letter monitoring, etc.
-    },
-    OnDeleteFailure: func(ctx context.Context, msg *consumer.SQSMessage, err error) {
-        // Critical: message will be redelivered causing duplicate processing
-        metrics.IncrCounter("consumer.delete.failure", "event_type", msg.EventType)
-        alerting.Send("SQS delete failed - duplicate processing likely", msg)
-    },
-}
-
-svc := consumer.NewService(sqsClient, handler, consumer.ServiceConfig{
-    QueueURL:    queueURL,
-    WorkerCount: 4,
-    Hooks:       hooks,
-})
-```
-
-**Available Consumer Hooks**:
+**Available Consumer Hooks:**
 - `OnConsumeStart` - Before attempting to process a message
 - `OnConsumeSuccess` - After successful message processing
-- `OnConsumeFailure` - When message processing fails (includes retryability flag)
+- `OnConsumeFailure` - When message processing fails
 - `OnMessageDead` - When message exceeds max retries
 - `OnDeleteFailure` - When deleting message from SQS fails (may cause duplicates)
 
@@ -987,11 +713,6 @@ import (
 
 // Load AWS config with Datadog tracing
 cfg, err := config.LoadDefaultConfig(ctx)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Wrap with Datadog tracer
 sqstrace.AppendMiddleware(&cfg)
 
 // Create traced SQS client
@@ -999,7 +720,6 @@ sqsClient := sqs.NewFromConfig(cfg)
 
 // Use with o4x - all SQS operations will be traced
 publisher := sqspub.NewPublisher(sqsClient, queueURL)
-consumerSvc := consumer.NewService(sqsClient, handler, config)
 ```
 
 ### OpenTelemetry Integration
@@ -1007,404 +727,33 @@ consumerSvc := consumer.NewService(sqsClient, handler, config)
 ```go
 import (
     "github.com/aws/aws-sdk-go-v2/config"
-    "github.com/aws/aws-sdk-go-v2/service/sqs"
     "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 )
 
 // Load AWS config
 cfg, err := config.LoadDefaultConfig(ctx)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Instrument with OpenTelemetry
 otelaws.AppendMiddleware(&cfg)
 
 // Create traced SQS client
 sqsClient := sqs.NewFromConfig(cfg)
-
-// Use with o4x
-publisher := sqspub.NewPublisher(sqsClient, queueURL)
 ```
 
-## Operational Considerations
+## Deployment and Schema Evolution
 
-### Partial Batch Success
+When modifying message payloads, understanding backward compatibility is critical.
 
-When using `BatchDispatcher`, the `UpdateBatchToPublished` method may return fewer updated rows than the number of IDs provided:
+**Safe Changes:**
+- ✅ Adding optional fields
+- ✅ Adding new event types
 
-```go
-// BatchDispatcher publishes 10 messages, but only 7 are updated to PUBLISHED
-updatedCount, err := repo.UpdateBatchToPublished(ctx, successIDs)
-// updatedCount might be 7 instead of 10
-```
+**Breaking Changes:**
+- ❌ Removing fields
+- ❌ Renaming fields
+- ❌ Changing field types
 
-**Why this happens:**
-- Messages in states other than `PUBLISHING` cannot be updated
-- During crash recovery, some messages may have already been processed
-- This is normal behavior and handled gracefully by the system
+For breaking changes, use the **Expand-Contract Pattern** (two-phase deployment with dual field support).
 
-**What happens to the remaining messages:**
-- They remain in `PUBLISHING` state temporarily
-- `ReviveStuckPublishing()` will move them to `FAILED` on the next startup (5+ minutes old)
-- They will be retried through the normal retry mechanism
-
-**When to investigate:**
-- If partial success occurs frequently (>5% of batches), check:
-  - Database connection stability
-  - Network reliability between application and database
-  - Database performance (slow queries, high load)
-
-### At-Least-Once Delivery Guarantees
-
-o4x guarantees **at-least-once delivery**, not exactly-once. Messages may be delivered multiple times in these scenarios:
-
-**Duplicate Delivery Scenarios:**
-
-1. **Publisher crash during state transition**
-   ```
-   1. Message published to SQS successfully
-   2. Process crashes before UpdateToPublished completes
-   3. On restart, ReviveStuckPublishing moves message to FAILED
-   4. Message is retried → Published again to SQS (duplicate)
-   ```
-
-2. **Database transaction rollback**
-   ```
-   1. UpdateToPublished transaction starts
-   2. Transaction rolls back due to database error
-   3. Message remains in PUBLISHING state
-   4. Eventually retried → Published again (duplicate)
-   ```
-
-3. **Consumer processing timeout**
-   ```
-   1. Handler processes message successfully
-   2. Processing takes longer than SQS VisibilityTimeout
-   3. Message becomes visible in SQS again
-   4. Another consumer receives the same message (duplicate)
-   ```
-
-**Mitigation Strategies:**
-
-✅ **Required: Idempotent Handlers**
-```go
-func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    // Use database unique constraint
-    result, err := h.db.Exec(ctx,
-        `INSERT INTO orders (id, customer_id, message_id, created_at)
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (message_id) DO NOTHING`,
-        orderID, customerID, msg.MessageID)
-
-    if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
-        // Already processed - return success
-        return nil
-    }
-
-    // Process new order...
-}
-```
-
-✅ **Recommended: Use IdempotencyKey**
-- Publisher: Set unique `IdempotencyKey` when inserting to outbox
-- Consumer: Use `msg.MessageID` or `msg.IdempotencyKey` for deduplication
-- FIFO queues provide 5-minute deduplication via MessageDeduplicationId
-
-✅ **Optional: Track Duplicates**
-```go
-hooks := &core.Hooks{
-    OnPublishSuccess: func(ctx context.Context, msg *core.Outbox, duration time.Duration) {
-        // Check if this message was published before
-        var count int
-        db.QueryRow("SELECT COUNT(*) FROM published_messages WHERE outbox_id = $1", msg.ID).Scan(&count)
-        if count > 1 {
-            metrics.IncrCounter("outbox.duplicates", "event_type", msg.EventType)
-        }
-    },
-}
-```
-
-### Payload Schema Evolution and Deployment
-
-When modifying message payloads, understanding backward compatibility is critical to avoid breaking running consumers during deployment.
-
-#### Safe Changes (Backward Compatible)
-
-✅ **Adding optional fields** - Old consumers ignore new fields:
-```go
-// Before
-type OrderCreated struct {
-    OrderID string `json:"order_id"`
-}
-
-// After - Safe: old consumers still work
-type OrderCreated struct {
-    OrderID   string `json:"order_id"`
-    UserEmail string `json:"user_email,omitempty"` // NEW field
-}
-```
-
-✅ **Adding new event types** - Existing consumers unaffected
-
-#### Breaking Changes (NOT Backward Compatible)
-
-❌ **Removing fields** - Old consumers expect the field, will fail/panic
-❌ **Renaming fields** - Old consumers can't find the field
-❌ **Changing field types** - Unmarshal errors (string → int, etc.)
-❌ **Changing field semantics** - Same field name, different meaning
-
-#### Two-Phase Deployment for Breaking Changes (Expand-Contract Pattern)
-
-When you must make breaking changes, use a **two-phase deployment**:
-
-**Phase 1: Expand (Add Support for Both Versions)**
-
-1. Deploy Consumer first with dual support:
-```go
-type OrderCreated struct {
-    OrderID     string `json:"order_id"`
-    CustomerID  string `json:"customer_id"`      // NEW field
-    UserID      string `json:"user_id"`          // OLD field (deprecated)
-}
-
-func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    var event OrderCreated
-    json.Unmarshal(msg.Body, &event)
-
-    // Support both old and new fields
-    customerID := event.CustomerID
-    if customerID == "" {
-        customerID = event.UserID // Fallback to old field
-    }
-    // ... use customerID
-}
-```
-
-2. Deploy Producer to send both fields:
-```go
-payload := OrderCreated{
-    OrderID:    "123",
-    CustomerID: "user-456", // NEW field
-    UserID:     "user-456", // OLD field (for old consumers)
-}
-```
-
-**Phase 2: Contract (Remove Old Version)**
-
-After all consumers updated (verify metrics/logs):
-
-1. Update Producer to send only new fields
-2. Update Consumer to remove old field support
-3. Remove deprecated fields from struct
-
-**Deployment Order Guidelines:**
-
-| Scenario | Deploy Order | Rationale |
-|----------|-------------|-----------|
-| **Adding fields** | Producer first, then Consumer | Safe - old consumers ignore new fields |
-| **Breaking changes** | **Consumer first**, then Producer | Consumer must handle both old/new before Producer sends new format |
-| **Rolling updates** | Consumer, wait for 100% rollout, then Producer | Ensures no old consumer receives new format |
-
-**Critical Rule:** During rolling updates, **old and new consumers coexist**. Producer must send format that both versions understand until 100% of consumers updated.
-
-#### Version Field Pattern (Advanced)
-
-For complex schema evolution, use explicit versioning:
-
-```go
-type EventEnvelope struct {
-    Version string          `json:"version"` // "v1", "v2"
-    Payload json.RawMessage `json:"payload"`
-}
-
-func (h *Handler) Handle(ctx context.Context, msg *consumer.SQSMessage) error {
-    var envelope EventEnvelope
-    json.Unmarshal(msg.Body, &envelope)
-
-    switch envelope.Version {
-    case "v1":
-        var v1 OrderCreatedV1
-        json.Unmarshal(envelope.Payload, &v1)
-        return h.handleV1(ctx, v1)
-    case "v2":
-        var v2 OrderCreatedV2
-        json.Unmarshal(envelope.Payload, &v2)
-        return h.handleV2(ctx, v2)
-    default:
-        return fmt.Errorf("unsupported version: %s", envelope.Version)
-    }
-}
-```
-
-**When to use versioning:**
-- Multiple breaking changes planned
-- Long-lived messages in queue (>1 week retention)
-- Complex payload with frequent evolution
-
-**Trade-offs:**
-- ✅ Explicit compatibility contracts
-- ✅ Easier to maintain multiple versions
-- ❌ Additional parsing overhead
-- ❌ More complex consumer code
-
-#### Alternative: Dispatcher Stop Pattern (Emergency/Large Changes)
-
-For urgent breaking changes when Expand-Contract adds too much complexity, you can temporarily stop the Dispatcher to drain the SQS queue before deploying.
-
-**When to use:**
-- Emergency breaking changes requiring immediate deployment
-- Large-scale schema changes affecting many fields
-- Situations where Expand-Contract dual-support code is impractical
-
-**Deployment Steps:**
-
-1. **Stop Dispatcher** - Prevents new messages from being sent to SQS (API continues to work, outbox writes continue)
-
-2. **Monitor SQS queue until empty** - Wait for Consumer to process all in-flight messages:
-   ```bash
-   # Monitor SQS queue message count
-   aws sqs get-queue-attributes \
-     --queue-url $QUEUE_URL \
-     --attribute-names ApproximateNumberOfMessages
-   ```
-
-3. **Deploy new Consumer** - Deploy Consumer version that expects new schema
-
-4. **Restart Dispatcher** - Accumulated outbox messages are sent to SQS with new schema format
-
-**Benefits:**
-- ✅ API continues to work (outbox writes continue during deployment)
-- ✅ Messages safely stored in outbox table (no data loss)
-- ✅ Guaranteed no old-format messages in SQS queue
-- ✅ Simpler than Expand-Contract for urgent changes (no dual-version code)
-- ⚠️ Message delivery delayed during deployment (typically minutes)
-
-**Comparison with Expand-Contract:**
-
-| Approach | Message Delay | Code Complexity | When to Use |
-|----------|---------------|-----------------|-------------|
-| **Expand-Contract** | None | High (dual-version support) | Planned changes, normal deployments |
-| **Dispatcher Stop** | Minutes | None (config change only) | Emergency fixes, large-scale changes |
-
-**Note:** This pattern is safe because the outbox table acts as a durable buffer. Messages accumulate during Dispatcher downtime and are reliably delivered once restarted.
-
-#### Recommended CLAUDE.md for Your Project (Optional)
-
-If you use **Claude Code** for code reviews, add this to your project's `CLAUDE.md` to automate compatibility checks:
-
-```markdown
-## o4x Message Schema Review Checklist
-
-When reviewing PRs that modify message payloads or handlers, verify:
-
-**Payload Compatibility:**
-- [ ] Is this change backward compatible?
-- [ ] Breaking changes use Expand-Contract pattern (dual field support)?
-- [ ] Deployment order documented (Consumer first for breaking changes)?
-- [ ] Safe: Adding optional fields ✅
-- [ ] Unsafe: Removing/renaming fields, changing types ❌
-
-**Idempotency Implementation:**
-- [ ] Handler is idempotent (handles duplicate messages correctly)
-- [ ] Pattern chosen based on use case:
-  - DB-only operations → InboxRepository with transaction
-  - External API with idempotency keys → InboxRepository (transaction or auto-commit)
-  - Naturally idempotent logic (INSERT ... ON CONFLICT DO NOTHING) → InboxRepository auto-commit or application-level
-- [ ] Handler returns `nil` for duplicates (not error)
-- [ ] External API calls without idempotency support → Reject async messaging approach
-
-**Deployment Safety:**
-- [ ] Rolling update compatibility verified (old/new consumers coexist)
-- [ ] No in-flight messages will break during deployment
-```
-
-This ensures Claude catches compatibility issues during PR reviews before deployment.
-
-### Performance Tuning
-
-**BatchDispatcher Configuration:**
-
-| Workload | BatchSize | WorkerCount | RequeueInterval | Expected Throughput |
-|----------|-----------|-------------|-----------------|---------------------|
-| Low volume (<100 msg/min) | 5 | 1 | 30s | ~100 msg/min |
-| Medium volume (100-1000 msg/min) | 10 | 2-4 | 10s | ~1,000-5,000 msg/min |
-| High volume (>1000 msg/min) | 10 | 8-16 | 5s | ~5,000-20,000 msg/min |
-
-**Database Connection Pool:**
-```go
-// For BatchDispatcher with 10 workers
-maxConns := WorkerCount * 2 + 5  // ~25 connections
-pool, _ := pgxpool.New(ctx, fmt.Sprintf("%s&pool_max_conns=%d", dbURL, maxConns))
-```
-
-**Worker Count Guidelines:**
-- **Too few workers**: Messages pile up in ENQUEUED state, increased latency
-- **Too many workers**: Database connection pool exhaustion, lock contention
-- **Rule of thumb**: Start with `WorkerCount = 2 * CPU cores`, adjust based on metrics
-
-**PollInterval Tuning:**
-- **100ms (default)**: Balanced latency and database load
-- **10ms**: Ultra-low latency (<100ms P99), higher database load
-- **500ms**: Reduce database queries by 80%, acceptable for non-real-time workloads
-
-**Monitoring Metrics:**
-```go
-hooks := &core.Hooks{
-    OnBatchPublishComplete: func(ctx context.Context, successCount, failCount int, duration time.Duration) {
-        metrics.RecordHistogram("batch.publish.duration", duration)
-        metrics.RecordGauge("batch.publish.success_rate", float64(successCount)/(successCount+failCount))
-    },
-}
-```
-
-**Benchmark Results:**
-
-Real-world performance measurements from `examples/app` (500 requests, concurrency=20, notification endpoint):
-
-| Component | Configuration | Throughput | P50 Latency | P95 Latency | Notes |
-|-----------|--------------|------------|-------------|-------------|-------|
-| **Dispatcher** | Workers=1 (1 CPU) | 439 req/s | 32ms | 104ms | ⚠️ Underutilizes DB connections |
-| **Dispatcher** | **Workers=2 (1 CPU)** ✅ | **820 req/s** | **18ms** | **73ms** | **Optimal for 1 CPU** |
-| **Dispatcher** | Workers=4 (1 CPU) | 544 req/s | 26ms | 149ms | ⚠️ Context switch overhead |
-| **Dispatcher** | Workers=8 (1 CPU) | 684 req/s | 21ms | 61ms | ⚠️ Context switch overhead |
-| **Dispatcher** | Workers=2 + GOMAXPROCS=1 | 602 req/s | 31ms | 73ms | ⚠️ Limits Go concurrency |
-| **Consumer** | MessageConcurrency=1 (2 CPU, I/O-bound) | 428 req/s | 33ms | 103ms | Sequential processing |
-| **Consumer** | MessageConcurrency=5 (2 CPU, I/O-bound) | 167 req/s | 63ms | 498ms | ⚠️ Resource contention sweet spot |
-| **Consumer** | **MessageConcurrency=10 (2 CPU, I/O-bound)** ✅ | **1043 req/s** | **12ms** | **69ms** | **+143% throughput** 🚀 |
-| **Consumer** | Workers=1 + MC=10 (2 CPU, I/O-bound) | 322 req/s | 29ms | 151ms | Underutilizes parallelism |
-| **Consumer** | **Workers=2 + MC=10 (2 CPU, I/O-bound)** ✅ | **750 req/s** | **23ms** | **51ms** | **Balanced configuration** |
-| **Consumer** | Workers=4 + MC=10 (2 CPU, I/O-bound) | 264 req/s | 62ms | 165ms | ⚠️ Excessive context switching |
-
-**Key Findings:**
-1. **Dispatcher (1 CPU)**: Workers=2 is optimal. Higher worker counts cause context switching overhead.
-2. **GOMAXPROCS**: Keep Go 1.25's default (GOMAXPROCS=2) even on 1 CPU - blocking I/O benefits from Go runtime concurrency.
-3. **Consumer MessageConcurrency**:
-   - For **I/O-bound handlers** (external APIs, long sleep): High concurrency (10+) dramatically improves throughput
-   - For **CPU-bound handlers**: Keep MessageConcurrency=1 (default)
-   - **Standard Queue only** - FIFO requires MessageConcurrency=1 for ordering
-4. **Consumer WorkerCount**: Workers=2 is optimal for 2 CPU environment. Higher counts cause context switching overhead similar to Dispatcher.
-5. **Sweet Spot Avoidance**: MessageConcurrency=5 showed worst performance due to resource contention without sufficient parallelism
-
-**Note:** Performance results may vary based on environment conditions, system load, and container vs direct execution. Results shown are from development environment and should be used as relative comparisons rather than absolute benchmarks.
-
-**Environment:** API (1 CPU), Dispatcher (1 CPU), Consumer (2 CPU), PostgreSQL, LocalStack. Handler sleep times: Email 250ms-2s, SMS 100-500ms, Push 50-300ms.
-
-**Database Optimization:**
-```sql
--- Ensure critical indexes exist
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_status_created_at
-ON outbox(status, created_at) WHERE status IN ('ENQUEUED', 'FAILED');
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_status_next_retry_at
-ON outbox(status, next_retry_at) WHERE status = 'FAILED';
-
--- Monitor table bloat
-SELECT schemaname, tablename,
-       pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
-FROM pg_tables
-WHERE tablename = 'outbox';
-```
+→ **For complete deployment strategies, Expand-Contract pattern, and Dispatcher Stop pattern**, see [docs/deployment.md](docs/deployment.md)
 
 ## License
 
