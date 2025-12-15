@@ -69,7 +69,7 @@ jobs:
           AWS_ACCESS_KEY_ID: test
           AWS_SECRET_ACCESS_KEY: test
         run: |
-          go test ./... -v -race -coverprofile=coverage.out -covermode=atomic -p 1
+          go test ./contrib/... ./core/... ./schema/... -v -race -coverprofile=coverage.out -covermode=atomic -p 1
 
       - name: Generate coverage report
         run: |
@@ -82,8 +82,8 @@ jobs:
           total=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
           echo "Total coverage: ${total}%"
 
-          # Set minimum threshold (currently at current levels, aspirational target is 80%)
-          threshold=60.0
+          # Set minimum threshold (library code only, excludes examples/app)
+          threshold=80.0
 
           if (( $(echo "$total < $threshold" | bc -l) )); then
             echo "❌ Coverage ${total}% is below threshold ${threshold}%"

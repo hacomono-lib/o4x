@@ -39,6 +39,7 @@ func (s *HooksSuite) TestNilHooks_AllCallsAreSafe() {
 		nilHooks.callOnMessageDead(s.ctx, s.msg, nil)
 		nilHooks.callOnBatchPublishStart(s.ctx, []*Outbox{s.msg})
 		nilHooks.callOnBatchPublishComplete(s.ctx, 1, 0, time.Second)
+		nilHooks.callOnPartialBatchSuccess(s.ctx, 10, 8, time.Second)
 	})
 }
 
@@ -54,6 +55,7 @@ func (s *HooksSuite) TestEmptyHooks_AllCallsAreSafe() {
 		emptyHooks.callOnMessageDead(s.ctx, s.msg, nil)
 		emptyHooks.callOnBatchPublishStart(s.ctx, []*Outbox{s.msg})
 		emptyHooks.callOnBatchPublishComplete(s.ctx, 1, 0, time.Second)
+		emptyHooks.callOnPartialBatchSuccess(s.ctx, 10, 8, time.Second)
 	})
 }
 
@@ -187,4 +189,79 @@ func (s *HooksSuite) TestOnBatchPublishComplete_CapturesAllParameters() {
 	assert.Equal(s.T(), 8, capturedSuccess)
 	assert.Equal(s.T(), 2, capturedFailure)
 	assert.Equal(s.T(), expectedDuration, capturedDuration)
+}
+
+func (s *HooksSuite) TestOnPartialBatchSuccess_CapturesAllParameters() {
+	// Arrange
+	var called int32
+	var capturedExpected, capturedActual int
+	var capturedDuration time.Duration
+	hooks := &Hooks{
+		OnPartialBatchSuccess: func(ctx context.Context, expectedCount, actualCount int, duration time.Duration) {
+			atomic.AddInt32(&called, 1)
+			capturedExpected = expectedCount
+			capturedActual = actualCount
+			capturedDuration = duration
+		},
+	}
+	expectedDuration := 300 * time.Millisecond
+
+	// Act
+	hooks.callOnPartialBatchSuccess(s.ctx, 10, 7, expectedDuration)
+
+	// Assert
+	assert.Equal(s.T(), int32(1), atomic.LoadInt32(&called))
+	assert.Equal(s.T(), 10, capturedExpected)
+	assert.Equal(s.T(), 7, capturedActual)
+	assert.Equal(s.T(), expectedDuration, capturedDuration)
+}
+
+func (s *HooksSuite) TestHook_PanicsAreRecoveredAndDoNotCrash() {
+	// Test all hooks recover from panics
+	hooks := &Hooks{
+		OnPublishStart: func(ctx context.Context, msg *Outbox) {
+			panic("OnPublishStart panic")
+		},
+		OnPublishSuccess: func(ctx context.Context, msg *Outbox, duration time.Duration) {
+			panic("OnPublishSuccess panic")
+		},
+		OnPublishFailure: func(ctx context.Context, msg *Outbox, err error, duration time.Duration, retryable bool) {
+			panic("OnPublishFailure panic")
+		},
+		OnMessageDead: func(ctx context.Context, msg *Outbox, err error) {
+			panic("OnMessageDead panic")
+		},
+		OnBatchPublishStart: func(ctx context.Context, msgs []*Outbox) {
+			panic("OnBatchPublishStart panic")
+		},
+		OnBatchPublishComplete: func(ctx context.Context, successCount, failureCount int, duration time.Duration) {
+			panic("OnBatchPublishComplete panic")
+		},
+		OnPartialBatchSuccess: func(ctx context.Context, expectedCount, actualCount int, duration time.Duration) {
+			panic("OnPartialBatchSuccess panic")
+		},
+	}
+
+	// Act & Assert - none of these should panic
+	assert.NotPanics(s.T(), func() {
+		hooks.callOnPublishStart(s.ctx, s.msg)
+	})
+	assert.NotPanics(s.T(), func() {
+		hooks.callOnPublishSuccess(s.ctx, s.msg, time.Second)
+	})
+	assert.NotPanics(s.T(), func() {
+		hooks.callOnPublishFailure(s.ctx, s.msg, nil, time.Second, true)
+	})
+	assert.NotPanics(s.T(), func() {
+		hooks.callOnMessageDead(s.ctx, s.msg, nil)
+	})
+	assert.NotPanics(s.T(), func() {
+		hooks.callOnBatchPublishStart(s.ctx, []*Outbox{s.msg})
+	})
+	assert.NotPanics(s.T(), func() {
+		hooks.callOnBatchPublishComplete(s.ctx, 1, 0, time.Second)
+	})
+	assert.NotPanics(s.T(), func() {
+		hooks.callOnPartialBatchSuccess(s.ctx, 10, 8, time.Second)
+	})
 }

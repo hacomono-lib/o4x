@@ -10,10 +10,10 @@ import (
 // TestOutbox_CanRetry tests the CanRetry method
 func TestOutbox_CanRetry(t *testing.T) {
 	tests := []struct {
-		name        string
-		retryCount  int
-		maxRetries  int
-		expected    bool
+		name       string
+		retryCount int
+		maxRetries int
+		expected   bool
 	}{
 		{
 			name:       "can retry when under max",
@@ -111,20 +111,20 @@ func TestCalculateNextRetryAt(t *testing.T) {
 		{
 			name:        "first retry",
 			retryCount:  0,
-			minDuration: 500 * time.Millisecond,  // baseInterval * 0.5
-			maxDuration: 2 * time.Second,         // baseInterval * 2 (with jitter)
+			minDuration: 500 * time.Millisecond, // baseInterval * 0.5
+			maxDuration: 2 * time.Second,        // baseInterval * 2 (with jitter)
 		},
 		{
 			name:        "second retry",
 			retryCount:  1,
-			minDuration: 1 * time.Second,         // baseInterval * 2 * 0.5
-			maxDuration: 4 * time.Second,         // baseInterval * 4 (with jitter)
+			minDuration: 1 * time.Second, // baseInterval * 2 * 0.5
+			maxDuration: 4 * time.Second, // baseInterval * 4 (with jitter)
 		},
 		{
 			name:        "many retries should cap at maxInterval",
 			retryCount:  10,
-			minDuration: 30 * time.Second,        // maxInterval * 0.5
-			maxDuration: 2 * time.Minute,         // maxInterval * 2 (with jitter)
+			minDuration: 30 * time.Second, // maxInterval * 0.5
+			maxDuration: 2 * time.Minute,  // maxInterval * 2 (with jitter)
 		},
 	}
 

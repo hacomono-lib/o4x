@@ -67,6 +67,8 @@ func (h *Hooks) callOnConsumeSuccess(ctx context.Context, msg *SQSMessage, durat
 
 // callOnConsumeFailure safely calls the OnConsumeFailure hook if set.
 // Panics in the hook are recovered and logged.
+//
+//nolint:unparam // retryable parameter kept for future extensibility
 func (h *Hooks) callOnConsumeFailure(ctx context.Context, msg *SQSMessage, err error, duration time.Duration, retryable bool) {
 	if h != nil && h.OnConsumeFailure != nil {
 		defer func() {

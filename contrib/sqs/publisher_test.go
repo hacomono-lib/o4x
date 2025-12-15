@@ -561,3 +561,161 @@ func (s *MultiBatchPublisherSuite) TestPublishBatch_PartialFailureInOneQueue_Oth
 	assert.Error(s.T(), results[1].Error)
 	s.mockClient.AssertExpectations(s.T())
 }
+
+func (s *MultiBatchPublisherSuite) TestMaxBatchSize_Returns10() {
+	publisher := NewMultiBatchPublisher(s.mockClient, NewEventTypeQueueMap("https://sqs.../queue"))
+	assert.Equal(s.T(), 10, publisher.MaxBatchSize())
+}
+
+// MultiQueuePublisherSuite tests MultiQueuePublisher (single message, multi-queue)
+type MultiQueuePublisherSuite struct {
+	suite.Suite
+	mockClient *MockSQSClient
+	ctx        context.Context
+}
+
+func TestMultiQueuePublisherSuite(t *testing.T) {
+	suite.Run(t, new(MultiQueuePublisherSuite))
+}
+
+func (s *MultiQueuePublisherSuite) SetupTest() {
+	s.mockClient = new(MockSQSClient)
+	s.ctx = context.Background()
+}
+
+func (s *MultiQueuePublisherSuite) TestPublish_RoutesToCorrectQueue() {
+	// Arrange
+	router := NewEventTypeQueueMap("https://sqs.../default-queue")
+	router.Register("order.created", "https://sqs.../orders-queue.fifo")
+	publisher := NewMultiQueuePublisher(s.mockClient, router)
+
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "order.created",
+		Payload:        []byte(`{"order_id":"123"}`),
+		IdempotencyKey: "order-123",
+	}
+
+	s.mockClient.On("SendMessage", s.ctx, mock.MatchedBy(func(input *sqs.SendMessageInput) bool {
+		return aws.ToString(input.QueueUrl) == "https://sqs.../orders-queue.fifo"
+	})).Return(&sqs.SendMessageOutput{MessageId: aws.String("sqs-msg-id")}, nil)
+
+	// Act
+	err := publisher.Publish(s.ctx, msg)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	s.mockClient.AssertExpectations(s.T())
+}
+
+func (s *MultiQueuePublisherSuite) TestPublish_OversizedPayload_ReturnsPermanentError() {
+	// Arrange
+	router := NewEventTypeQueueMap("https://sqs.../default-queue")
+	publisher := NewMultiQueuePublisher(s.mockClient, router)
+	oversizedPayload := make([]byte, MaxSQSMessageSize+1)
+
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "test.event",
+		Payload:        oversizedPayload,
+		IdempotencyKey: "test-key",
+	}
+
+	// Act
+	err := publisher.Publish(s.ctx, msg)
+
+	// Assert
+	assert.Error(s.T(), err)
+	assert.True(s.T(), !core.IsRetryable(err), "oversized error should not be retryable")
+	assert.ErrorIs(s.T(), err, core.ErrPayloadTooLarge)
+}
+
+func (s *BatchPublisherSuite) TestPublish_SingleMessage_Success() {
+	// Arrange
+	publisher := NewBatchPublisher(s.mockClient, "https://sqs.../queue.fifo")
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "order.created",
+		Payload:        []byte(`{"order_id":"123"}`),
+		IdempotencyKey: "order-123",
+	}
+
+	s.mockClient.On("SendMessage", s.ctx, mock.MatchedBy(func(input *sqs.SendMessageInput) bool {
+		return aws.ToString(input.QueueUrl) == "https://sqs.../queue.fifo"
+	})).Return(&sqs.SendMessageOutput{MessageId: aws.String("sqs-msg-id")}, nil)
+
+	// Act
+	err := publisher.Publish(s.ctx, msg)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	s.mockClient.AssertExpectations(s.T())
+}
+
+func (s *BatchPublisherSuite) TestPublish_OversizedPayload_ReturnsPermanentError() {
+	// Arrange
+	publisher := NewBatchPublisher(s.mockClient, "https://sqs.../queue.fifo")
+	oversizedPayload := make([]byte, MaxSQSMessageSize+1)
+
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "test.event",
+		Payload:        oversizedPayload,
+		IdempotencyKey: "test-key",
+	}
+
+	// Act
+	err := publisher.Publish(s.ctx, msg)
+
+	// Assert
+	assert.Error(s.T(), err)
+	assert.True(s.T(), !core.IsRetryable(err), "oversized error should not be retryable")
+	assert.ErrorIs(s.T(), err, core.ErrPayloadTooLarge)
+}
+
+func (s *MultiBatchPublisherSuite) TestPublish_SingleMessage_Success() {
+	// Arrange
+	router := NewEventTypeQueueMap("https://sqs.../default-queue")
+	router.Register("order.created", "https://sqs.../orders-queue.fifo")
+	publisher := NewMultiBatchPublisher(s.mockClient, router)
+
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "order.created",
+		Payload:        []byte(`{"order_id":"123"}`),
+		IdempotencyKey: "order-123",
+	}
+
+	s.mockClient.On("SendMessage", s.ctx, mock.MatchedBy(func(input *sqs.SendMessageInput) bool {
+		return aws.ToString(input.QueueUrl) == "https://sqs.../orders-queue.fifo"
+	})).Return(&sqs.SendMessageOutput{MessageId: aws.String("sqs-msg-id")}, nil)
+
+	// Act
+	err := publisher.Publish(s.ctx, msg)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	s.mockClient.AssertExpectations(s.T())
+}
+
+func (s *MultiBatchPublisherSuite) TestPublish_OversizedPayload_ReturnsPermanentError() {
+	// Arrange
+	router := NewEventTypeQueueMap("https://sqs.../default-queue")
+	publisher := NewMultiBatchPublisher(s.mockClient, router)
+	oversizedPayload := make([]byte, MaxSQSMessageSize+1)
+
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "test.event",
+		Payload:        oversizedPayload,
+		IdempotencyKey: "test-key",
+	}
+
+	// Act
+	err := publisher.Publish(s.ctx, msg)
+
+	// Assert
+	assert.Error(s.T(), err)
+	assert.True(s.T(), !core.IsRetryable(err), "oversized error should not be retryable")
+	assert.ErrorIs(s.T(), err, core.ErrPayloadTooLarge)
+}

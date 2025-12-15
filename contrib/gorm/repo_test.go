@@ -804,3 +804,176 @@ func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_MultipleWorkersNo
 		s.Assert().Equal(core.OutboxStatusPublishing, msg.Status)
 	}
 }
+
+func (s *OutboxRepositorySuite) TestInsertOutboxJSON_MarshalStructAsPayload() {
+	// Arrange
+	ctx := context.Background()
+	type TestPayload struct {
+		OrderID string `json:"order_id"`
+		Amount  int    `json:"amount"`
+	}
+	payload := TestPayload{OrderID: "order-123", Amount: 1000}
+
+	// Act
+	msg, err := s.repo.InsertOutboxJSON(ctx, "order.created", payload, "test-json-key", 5)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	assert.NotNil(s.T(), msg)
+	assert.Equal(s.T(), "order.created", msg.EventType)
+	assert.Equal(s.T(), "test-json-key", msg.IdempotencyKey)
+	assert.Equal(s.T(), 5, msg.MaxRetries)
+	assert.JSONEq(s.T(), `{"order_id":"order-123","amount":1000}`, string(msg.Payload))
+}
+
+func (s *OutboxRepositorySuite) TestInsertOutboxJSONWithMetadata_MarshalStructWithMetadata() {
+	// Arrange
+	ctx := context.Background()
+	type TestPayload struct {
+		UserID string `json:"user_id"`
+	}
+	type TestMetadata struct {
+		Source string `json:"source"`
+		Trace  string `json:"trace_id"`
+	}
+	payload := TestPayload{UserID: "user-456"}
+	metadata := TestMetadata{Source: "api", Trace: "trace-123"}
+
+	// Act
+	msg, err := s.repo.InsertOutboxJSONWithMetadata(ctx, "user.registered", payload, metadata, "test-metadata-key", 3)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	assert.NotNil(s.T(), msg)
+	assert.Equal(s.T(), "user.registered", msg.EventType)
+	assert.JSONEq(s.T(), `{"user_id":"user-456"}`, string(msg.Payload))
+	assert.NotNil(s.T(), msg.Metadata)
+	assert.JSONEq(s.T(), `{"source":"api","trace_id":"trace-123"}`, string(msg.Metadata))
+}
+
+func (s *OutboxRepositorySuite) TestInsertOutboxJSONWithMetadata_NilMetadata() {
+	// Arrange
+	ctx := context.Background()
+	type TestPayload struct {
+		Data string `json:"data"`
+	}
+	payload := TestPayload{Data: "test"}
+
+	// Act
+	msg, err := s.repo.InsertOutboxJSONWithMetadata(ctx, "test.event", payload, nil, "test-nil-metadata-key", 3)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	assert.NotNil(s.T(), msg)
+	assert.Nil(s.T(), msg.Metadata)
+}
+
+// ConfigOptionsSuite tests config options
+type ConfigOptionsSuite struct {
+	suite.Suite
+	db *gorm.DB
+}
+
+func TestConfigOptionsSuite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	suite.Run(t, new(ConfigOptionsSuite))
+}
+
+func (s *ConfigOptionsSuite) SetupSuite() {
+	db, err := gorm.Open(postgres.Open(testDatabaseURL()), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		s.T().Skipf("failed to connect to test database: %v (ensure docker-compose is running)", err)
+	}
+	s.db = db
+}
+
+func (s *ConfigOptionsSuite) TearDownSuite() {
+	if s.db != nil {
+		sqlDB, err := s.db.DB()
+		if err == nil {
+			sqlDB.Close()
+		}
+	}
+}
+
+func (s *ConfigOptionsSuite) TestWithInboxTableName_SetsCustomInboxTable() {
+	// Arrange
+	ctx := context.Background()
+	customInboxTableName := "custom_inbox_gorm"
+
+	// Create custom inbox table
+	err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS ` + customInboxTableName + ` (
+			consumer_name TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (consumer_name, message_id)
+		)
+	`).Error
+	s.Require().NoError(err)
+	defer s.db.Exec("DROP TABLE IF EXISTS " + customInboxTableName) //nolint:errcheck // test cleanup, error not critical
+
+	// Create InboxRepository with custom table name
+	inboxRepo := NewInboxRepository(s.db, WithInboxTableName(customInboxTableName))
+
+	// Act - TryStart checks if message exists (should not exist initially)
+	ok, err := inboxRepo.TryStart(ctx, "test-consumer", "msg-123")
+	assert.NoError(s.T(), err)
+	assert.True(s.T(), ok, "first call should return true (not exists)")
+
+	// Complete the message to insert a record
+	err = inboxRepo.Complete(ctx, "test-consumer", "msg-123")
+	assert.NoError(s.T(), err)
+
+	// Verify it's in the custom table
+	var count int64
+	err = s.db.Table(customInboxTableName).Count(&count).Error
+	assert.NoError(s.T(), err)
+	assert.Equal(s.T(), int64(1), count)
+
+	// Cleanup
+	_ = s.db.Exec("DELETE FROM " + customInboxTableName)
+}
+
+func (s *ConfigOptionsSuite) TestWithStuckPublishingThreshold_CustomThreshold() {
+	// Arrange
+	ctx := context.Background()
+	customThreshold := 30 * time.Second
+	repo := NewOutboxRepository(s.db, WithStuckPublishingThreshold(customThreshold))
+
+	// Insert and lock message to PUBLISHING
+	inserted, err := repo.Insert(ctx, core.OutboxInsertParams{
+		EventType:      "test.event",
+		Payload:        json.RawMessage(`{"key":"value"}`),
+		IdempotencyKey: "threshold-test-key-gorm",
+		MaxRetries:     3,
+	})
+	s.Require().NoError(err)
+
+	// Lock to PUBLISHING
+	_, err = repo.FetchAndLockToPublishing(ctx)
+	s.Require().NoError(err)
+
+	// Set updated_at to 45 seconds ago (exceeds 30s threshold)
+	err = s.db.Exec("UPDATE outbox SET updated_at = NOW() - INTERVAL '45 seconds' WHERE id = ?", inserted.ID).Error
+	s.Require().NoError(err)
+
+	// Act - Revive stuck messages
+	count, err := repo.ReviveStuckPublishing(ctx)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	assert.Equal(s.T(), int64(1), count, "should revive 1 stuck message")
+
+	// Verify status changed to FAILED
+	msg, err := repo.GetByID(ctx, inserted.ID)
+	s.Require().NoError(err)
+	assert.Equal(s.T(), core.OutboxStatusFailed, msg.Status)
+
+	// Cleanup
+	_ = s.db.Exec("DELETE FROM outbox WHERE id = ?", inserted.ID)
+}

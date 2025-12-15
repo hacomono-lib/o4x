@@ -93,10 +93,10 @@ func (m *mockSQSClient) addMessageWithReceiveCount(messageID, body string, recei
 		"ApproximateReceiveCount": fmt.Sprintf("%d", receiveCount),
 	}
 	m.messages = append(m.messages, sqstypes.Message{
-		MessageId:       aws.String(messageID),
-		Body:            aws.String(body),
-		ReceiptHandle:   aws.String(fmt.Sprintf("receipt-%s", messageID)),
-		Attributes:      attributes,
+		MessageId:     aws.String(messageID),
+		Body:          aws.String(body),
+		ReceiptHandle: aws.String(fmt.Sprintf("receipt-%s", messageID)),
+		Attributes:    attributes,
 		MessageAttributes: map[string]sqstypes.MessageAttributeValue{
 			"event_type": {
 				DataType:    aws.String("String"),

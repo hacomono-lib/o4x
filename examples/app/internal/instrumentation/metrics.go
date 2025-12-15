@@ -37,23 +37,23 @@ type PublishMetrics struct {
 // MetricsCollector collects and aggregates dispatcher metrics
 type MetricsCollector struct {
 	// Fetch metrics
-	totalFetches   atomic.Int64
-	totalRows      atomic.Int64
-	totalDuration  atomic.Int64 // in nanoseconds
-	emptyFetches   atomic.Int64
+	totalFetches  atomic.Int64
+	totalRows     atomic.Int64
+	totalDuration atomic.Int64 // in nanoseconds
+	emptyFetches  atomic.Int64
 
 	// Transaction duration metrics (same as fetch duration, but tracked separately for clarity)
 	minTxnDuration atomic.Int64 // in nanoseconds
 	maxTxnDuration atomic.Int64 // in nanoseconds
 
 	// Publish metrics
-	totalPublishes      atomic.Int64
-	totalPublishSuccess atomic.Int64
-	totalPublishFailure atomic.Int64
+	totalPublishes       atomic.Int64
+	totalPublishSuccess  atomic.Int64
+	totalPublishFailure  atomic.Int64
 	totalPublishDuration atomic.Int64 // in nanoseconds
 
 	// Detailed metrics per worker
-	mu sync.Mutex
+	mu          sync.Mutex
 	workerStats map[int]*WorkerStats
 
 	logger *slog.Logger
@@ -181,13 +181,13 @@ func (mc *MetricsCollector) GetFetchStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_fetches":      totalFetches,
-		"total_rows":         totalRows,
-		"empty_fetches":      emptyFetches,
-		"empty_fetch_pct":    emptyFetchPct,
-		"avg_duration_ms":    avgDurationMs,
-		"avg_duration_us":    avgDurationUs,
-		"avg_rows_per_fetch": avgRowsPerFetch,
+		"total_fetches":       totalFetches,
+		"total_rows":          totalRows,
+		"empty_fetches":       emptyFetches,
+		"empty_fetch_pct":     emptyFetchPct,
+		"avg_duration_ms":     avgDurationMs,
+		"avg_duration_us":     avgDurationUs,
+		"avg_rows_per_fetch":  avgRowsPerFetch,
 		"min_txn_duration_us": minTxn / 1000,
 		"max_txn_duration_us": maxTxn / 1000,
 		"min_txn_duration_ms": minTxn / 1000000,

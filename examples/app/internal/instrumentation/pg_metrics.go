@@ -17,9 +17,9 @@ type PGPoolMetrics struct {
 	MaxConns int32
 
 	// Current state
-	TotalConns     int32
-	AcquiredConns  int32
-	IdleConns      int32
+	TotalConns        int32
+	AcquiredConns     int32
+	IdleConns         int32
 	ConstructingConns int32
 
 	// Acquire statistics
@@ -39,19 +39,19 @@ type PGActivityMetrics struct {
 	Timestamp time.Time
 
 	// By state
-	Active       int
-	Idle         int
-	IdleInTxn    int
-	Waiting      int
+	Active    int
+	Idle      int
+	IdleInTxn int
+	Waiting   int
 
 	// By wait_event_type
-	WaitLock     int
-	WaitIO       int
-	WaitClient   int
-	WaitOther    int
+	WaitLock   int
+	WaitIO     int
+	WaitClient int
+	WaitOther  int
 
 	// Total connections
-	TotalConns   int
+	TotalConns int
 }
 
 // PGMetricsCollector collects PostgreSQL connection and activity metrics
@@ -78,17 +78,17 @@ func (c *PGMetricsCollector) CollectPoolMetrics() PGPoolMetrics {
 	stats := c.pool.Stat()
 
 	metrics := PGPoolMetrics{
-		Timestamp:             time.Now(),
-		MaxConns:              stats.MaxConns(),
-		TotalConns:            stats.TotalConns(),
-		AcquiredConns:         stats.AcquiredConns(),
-		IdleConns:             stats.IdleConns(),
-		ConstructingConns:     stats.ConstructingConns(),
-		AcquireCount:          stats.AcquireCount(),
-		AcquireDuration:       stats.AcquireDuration(),
-		AcquiredConnsCount:    int64(stats.AcquiredConns()),
-		CanceledAcquireCount:  stats.CanceledAcquireCount(),
-		EmptyAcquireCount:     stats.EmptyAcquireCount(),
+		Timestamp:            time.Now(),
+		MaxConns:             stats.MaxConns(),
+		TotalConns:           stats.TotalConns(),
+		AcquiredConns:        stats.AcquiredConns(),
+		IdleConns:            stats.IdleConns(),
+		ConstructingConns:    stats.ConstructingConns(),
+		AcquireCount:         stats.AcquireCount(),
+		AcquireDuration:      stats.AcquireDuration(),
+		AcquiredConnsCount:   int64(stats.AcquiredConns()),
+		CanceledAcquireCount: stats.CanceledAcquireCount(),
+		EmptyAcquireCount:    stats.EmptyAcquireCount(),
 	}
 
 	// Calculate derived metrics

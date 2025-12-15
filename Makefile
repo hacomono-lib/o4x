@@ -13,8 +13,8 @@ test-v: up ## Run all tests with verbose output
 test-short: ## Run unit tests only (no DB required)
 	go test ./... -short --count=1 -race
 
-test-coverage: ## Run tests with coverage report
-	go test ./... -coverprofile=coverage.out --count=1 -race -p 1
+test-coverage: ## Run tests with coverage report (excludes examples/app)
+	go test ./contrib/... ./core/... ./schema/... -coverprofile=coverage.out --count=1 -race -p 1
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 

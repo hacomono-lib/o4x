@@ -147,6 +147,23 @@ func (s *PublishErrorSuite) TestWithPermanentCause_IsNotRetryable() {
 	assert.False(s.T(), result, "PublishError with PermanentError cause should not be retryable")
 }
 
+func (s *PublishErrorSuite) TestError_FormatsMessageCorrectly() {
+	// Arrange
+	cause := errors.New("network timeout")
+	err := &PublishError{
+		OutboxID:  "msg-123",
+		EventType: "order.created",
+		Cause:     cause,
+	}
+
+	// Act
+	result := err.Error()
+
+	// Assert
+	expected := "publish error for outbox msg-123 event_type order.created: network timeout"
+	assert.Equal(s.T(), expected, result)
+}
+
 // CustomRetryableErrorSuite tests custom RetryableError implementations
 type CustomRetryableErrorSuite struct {
 	suite.Suite
