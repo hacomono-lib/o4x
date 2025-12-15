@@ -84,6 +84,17 @@ func (r *InboxRepository) WithTx(tx pgx.Tx) *InboxRepository {
 
 // TryStart checks if this message has already been processed.
 //
+// **CRITICAL: TryStart is NOT Exclusive**
+//
+// TryStart does NOT provide exclusivity or mutual exclusion semantics.
+// Multiple consumer workers MAY pass TryStart() concurrently for the same message.
+//
+// This behavior is intentional and correct:
+//   - Primary control: SQS visibility timeout prevents concurrent processing
+//   - The inbox table represents **completed messages only**
+//   - In-flight processing is controlled by the message broker (SQS visibility timeout)
+//   - The only definitive point is Complete()
+//
 // Canonical Implementation:
 //
 //	SELECT EXISTS(

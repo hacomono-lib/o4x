@@ -80,3 +80,62 @@ func (s *SchemaSuite) TestDropOutboxDDL_GeneratesCorrectStatements() {
 	assert.Contains(s.T(), ddl, "DROP TABLE IF EXISTS outbox;")
 	assert.Contains(s.T(), ddl, "DROP TYPE IF EXISTS outbox_status;")
 }
+
+func (s *SchemaSuite) TestConsumerInboxDDL_GeneratesCorrectSchema() {
+	// Arrange
+	tableName := "consumer_inbox"
+
+	// Act
+	ddl := ConsumerInboxDDL(tableName)
+
+	// Assert
+	// Check table creation
+	assert.Contains(s.T(), ddl, "CREATE TABLE consumer_inbox")
+	assert.Contains(s.T(), ddl, "consumer_name    TEXT NOT NULL")
+	assert.Contains(s.T(), ddl, "message_id       TEXT NOT NULL")
+	assert.Contains(s.T(), ddl, "completed_at     TIMESTAMPTZ NOT NULL DEFAULT now()")
+	assert.Contains(s.T(), ddl, "PRIMARY KEY (consumer_name, message_id)")
+
+	// Check index for cleanup
+	assert.Contains(s.T(), ddl, "CREATE INDEX idx_consumer_inbox_completed_at")
+	assert.Contains(s.T(), ddl, "ON consumer_inbox (completed_at)")
+
+	// Check comments
+	assert.Contains(s.T(), ddl, "Consumer Inbox Schema")
+	assert.Contains(s.T(), ddl, "Track COMPLETED messages only")
+}
+
+func (s *SchemaSuite) TestConsumerInboxDDL_WithCustomTableName() {
+	// Arrange
+	tableName := "custom_inbox"
+
+	// Act
+	ddl := ConsumerInboxDDL(tableName)
+
+	// Assert
+	assert.Contains(s.T(), ddl, "CREATE TABLE custom_inbox")
+	assert.Contains(s.T(), ddl, "idx_custom_inbox_completed_at")
+	assert.Contains(s.T(), ddl, "ON custom_inbox (completed_at)")
+}
+
+func (s *SchemaSuite) TestDropConsumerInboxDDL_GeneratesCorrectStatements() {
+	// Arrange
+	tableName := "consumer_inbox"
+
+	// Act
+	ddl := DropConsumerInboxDDL(tableName)
+
+	// Assert
+	assert.Contains(s.T(), ddl, "DROP TABLE IF EXISTS consumer_inbox;")
+}
+
+func (s *SchemaSuite) TestDropConsumerInboxDDL_WithCustomTableName() {
+	// Arrange
+	tableName := "custom_inbox"
+
+	// Act
+	ddl := DropConsumerInboxDDL(tableName)
+
+	// Assert
+	assert.Contains(s.T(), ddl, "DROP TABLE IF EXISTS custom_inbox;")
+}

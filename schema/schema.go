@@ -36,6 +36,20 @@ CREATE TABLE %s (
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Column comments for outbox table
+COMMENT ON COLUMN %s.id IS 'Unique message identifier (UUID v7 for time-ordered)';
+COMMENT ON COLUMN %s.event_type IS 'Event type identifier for routing (e.g. order.created)';
+COMMENT ON COLUMN %s.payload IS 'Message payload as JSON';
+COMMENT ON COLUMN %s.metadata IS 'Optional metadata (trace context, custom headers, etc.)';
+COMMENT ON COLUMN %s.idempotency_key IS 'Unique key per event_type to prevent duplicate insertions';
+COMMENT ON COLUMN %s.status IS 'Current message state in the outbox pattern';
+COMMENT ON COLUMN %s.error_message IS 'Last error message (truncated to 4000 bytes, sanitized)';
+COMMENT ON COLUMN %s.retry_count IS 'Number of failed publish attempts';
+COMMENT ON COLUMN %s.max_retries IS 'Maximum retries before marking as DEAD';
+COMMENT ON COLUMN %s.next_retry_at IS 'Scheduled time for next retry attempt (with exponential backoff)';
+COMMENT ON COLUMN %s.created_at IS 'Timestamp when message was inserted into outbox';
+COMMENT ON COLUMN %s.updated_at IS 'Timestamp of last status change';
+
 -- Index for efficient polling by dispatcher
 CREATE INDEX idx_%s_status_created_at
   ON %s (status, created_at);
@@ -54,7 +68,9 @@ CREATE INDEX idx_%s_status_next_retry_at
 ALTER TABLE %s
   ADD CONSTRAINT uq_%s_event_type_idempotency
     UNIQUE (event_type, idempotency_key);
-`, enumName, tableName, enumName, tableName, tableName, tableName, tableName, tableName, tableName)
+`, enumName, tableName, enumName,
+		tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, // 12x for COMMENT statements
+		tableName, tableName, tableName, tableName, tableName, tableName) // 6x for indexes and constraints
 }
 
 // DropOutboxDDL generates the DDL to drop the outbox table and its ENUM type.
@@ -105,10 +121,15 @@ CREATE TABLE %s (
   PRIMARY KEY (consumer_name, message_id)
 );
 
+-- Column comments for consumer_inbox table
+COMMENT ON COLUMN %s.consumer_name IS 'Logical consumer service identity (e.g., order-service, notification-service)';
+COMMENT ON COLUMN %s.message_id IS 'Unique message identifier from the message broker (e.g., SQS MessageID)';
+COMMENT ON COLUMN %s.completed_at IS 'Timestamp when message processing was completed successfully';
+
 -- Index for cleanup queries (DELETE WHERE completed_at < ...)
 CREATE INDEX idx_%s_completed_at
   ON %s (completed_at);
-`, tableName, tableName, tableName)
+`, tableName, tableName, tableName, tableName, tableName, tableName)
 }
 
 // DropConsumerInboxDDL generates the DDL to drop the consumer_inbox table.

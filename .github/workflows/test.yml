@@ -1,0 +1,121 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: o4x
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      localstack:
+        image: localstack/localstack:3.7
+        env:
+          SERVICES: sqs
+          DEFAULT_REGION: us-east-1
+        ports:
+          - 4566:4566
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Wait for services
+        run: |
+          timeout 60 bash -c 'until pg_isready -h localhost -p 5432; do sleep 1; done'
+          sleep 5
+
+      - name: Initialize database schema
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Generate schema.sql if it doesn't exist
+          if [ ! -f scripts/schema.sql ]; then
+            go run cmd/o4x-schema/main.go --with-inbox > scripts/schema.sql
+          fi
+
+          # Apply schema to test database
+          psql -h localhost -U postgres -d o4x -f scripts/schema.sql
+
+      - name: Run tests with coverage
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/o4x?sslmode=disable
+          SQS_ENDPOINT: http://localhost:4566
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+        run: |
+          go test ./... -v -race -coverprofile=coverage.out -covermode=atomic -p 1
+
+      - name: Generate coverage report
+        run: |
+          go tool cover -func=coverage.out -o coverage.txt
+          cat coverage.txt
+
+      - name: Check coverage threshold
+        run: |
+          # Extract overall coverage percentage
+          total=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: ${total}%"
+
+          # Set minimum threshold (currently at current levels, aspirational target is 80%)
+          threshold=60.0
+
+          if (( $(echo "$total < $threshold" | bc -l) )); then
+            echo "❌ Coverage ${total}% is below threshold ${threshold}%"
+            exit 1
+          else
+            echo "✅ Coverage ${total}% meets threshold ${threshold}%"
+          fi
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.out
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
@@ -51,13 +52,14 @@ func (s *DispatcherSuite) TestNewDispatcher_WithDefaultConfig() {
 func (s *DispatcherSuite) TestNewDispatcher_WithCustomConfig() {
 	// Arrange
 	config := DispatcherConfig{
-		PollInterval:    200 * time.Millisecond,
-		MaxPollInterval: 5 * time.Second,
-		WorkerCount:     4,
-		ShutdownTimeout: 60 * time.Second,
-		ForceTimeout:    120 * time.Second,
-		AutoRecover:     false,
-		Logger:          s.logger,
+		PollInterval:       200 * time.Millisecond,
+		MaxPollInterval:    5 * time.Second,
+		WorkerCount:        4,
+		ShutdownTimeout:    60 * time.Second,
+		ForceTimeout:       120 * time.Second,
+		AutoRecover:        false,
+		Logger:             s.logger,
+		DisableAutoRequeue: true,
 	}
 
 	// Act
@@ -76,8 +78,9 @@ func (s *DispatcherSuite) TestNewDispatcher_WithCustomConfig() {
 func (s *DispatcherSuite) TestStart_WhenAlreadyRunning_ReturnsError() {
 	// Arrange
 	config := DispatcherConfig{
-		Logger:      s.logger,
-		AutoRecover: false,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -98,8 +101,9 @@ func (s *DispatcherSuite) TestStart_WhenAlreadyRunning_ReturnsError() {
 func (s *DispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublishing() {
 	// Arrange
 	config := DispatcherConfig{
-		Logger:      s.logger,
-		AutoRecover: true,
+		Logger:             s.logger,
+		AutoRecover:        true,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -123,8 +127,9 @@ func (s *DispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublishing()
 func (s *DispatcherSuite) TestStart_WithoutAutoRecover_DoesNotCallReviveStuckPublishing() {
 	// Arrange
 	config := DispatcherConfig{
-		Logger:      s.logger,
-		AutoRecover: false,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -142,9 +147,10 @@ func (s *DispatcherSuite) TestStart_WithoutAutoRecover_DoesNotCallReviveStuckPub
 func (s *DispatcherSuite) TestStartAndStop_IsRunningReflectsState() {
 	// Arrange
 	config := DispatcherConfig{
-		Logger:          s.logger,
-		AutoRecover:     false,
-		ShutdownTimeout: 5 * time.Second,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		ShutdownTimeout:    5 * time.Second,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -171,10 +177,11 @@ func (s *DispatcherSuite) TestDispatcher_ProcessesMessages() {
 	s.repo.AddMessage(msg)
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -204,10 +211,11 @@ func (s *DispatcherSuite) TestDispatcher_HandlesPublishFailure() {
 	}
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -237,10 +245,11 @@ func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadAfterMaxRetries() {
 	}
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -269,10 +278,11 @@ func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadOnPermanentError() {
 	}
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -307,11 +317,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishStart() {
 	}
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
-		Hooks:        hooks,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		Hooks:              hooks,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -346,11 +357,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishSuccess() {
 	}
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
-		Hooks:        hooks,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		Hooks:              hooks,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -391,11 +403,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishFailure() {
 	}
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
-		Hooks:        hooks,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		Hooks:              hooks,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -435,11 +448,12 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnMessageDead() {
 	}
 
 	config := DispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		WorkerCount:  1,
-		Hooks:        hooks,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		WorkerCount:        1,
+		Hooks:              hooks,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -480,4 +494,99 @@ func (s *DispatcherConfigSuite) TestDefaultDispatcherConfig_ReturnsExpectedValue
 	assert.True(s.T(), config.AutoRecover)
 	assert.NotNil(s.T(), config.OnForceShutdown)
 	assert.NotNil(s.T(), config.Logger)
+}
+
+// TestDispatcher_HealthStatus tests the HealthStatus method for non-batch dispatcher
+func TestDispatcher_HealthStatus(t *testing.T) {
+	repo := NewMockOutboxRepository()
+	publisher := NewMockPublisher()
+
+	config := DispatcherConfig{
+		WorkerCount:        3,
+		DisableAutoRequeue: true,
+	}
+
+	dispatcher, err := NewDispatcher(repo, publisher, config)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Test before start
+	status := dispatcher.HealthStatus()
+	assert.False(t, status.IsHealthy())
+	assert.False(t, status.Running)
+	assert.Equal(t, 3, status.WorkerCount)
+
+	// Start dispatcher
+	go func() {
+		_ = dispatcher.Start(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Test while running
+	status = dispatcher.HealthStatus()
+	assert.True(t, status.IsHealthy())
+	assert.True(t, status.Running)
+	assert.False(t, status.PendingShutdown)
+
+	// Stop dispatcher
+	cancel()
+	dispatcher.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	// Test after stop
+	status = dispatcher.HealthStatus()
+	assert.False(t, status.IsHealthy())
+	assert.False(t, status.Running)
+}
+
+// TestDispatcher_RunRequeueWorker tests the requeue worker
+func TestDispatcher_RunRequeueWorker(t *testing.T) {
+	repo := NewMockOutboxRepository()
+	publisher := NewMockPublisher()
+
+	// Add an enqueued message
+	msg := &Outbox{
+		ID:             uuid.New().String(),
+		EventType:      "test.event",
+		Payload:        []byte(`{}`),
+		IdempotencyKey: "test-key",
+		Status:         OutboxStatusEnqueued,
+		RetryCount:     1,
+		MaxRetries:     5,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	repo.AddMessage(msg)
+
+	var requeueCalled bool
+	repo.RequeueFailedFunc = func(ctx context.Context) (int64, error) {
+		requeueCalled = true
+		return 1, nil
+	}
+
+	config := DispatcherConfig{
+		WorkerCount:     1,
+		RequeueInterval: 100 * time.Millisecond,
+	}
+
+	dispatcher, err := NewDispatcher(repo, publisher, config)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	// Start dispatcher
+	go func() {
+		_ = dispatcher.Start(ctx)
+	}()
+
+	// Wait for requeue worker to run
+	time.Sleep(250 * time.Millisecond)
+	dispatcher.Stop()
+
+	// Verify RequeueFailed was called
+	assert.True(t, requeueCalled, "RequeueFailed should have been called by requeue worker")
 }

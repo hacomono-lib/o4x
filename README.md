@@ -33,6 +33,33 @@ o4x provides reliable message delivery from PostgreSQL to SQS using the [transac
 go get github.com/hacomono-lib/o4x
 ```
 
+## Test Coverage
+
+o4x maintains high test coverage across all packages to ensure reliability and correctness.
+
+| Package | Coverage | Status |
+|---------|----------|--------|
+| contrib/sqs | 75.3% | ✅ |
+| contrib/gorm | 73.7% | ✅ |
+| contrib/pgx | 73.3% | ✅ |
+| core | 70.3% | ⚠️ |
+| schema | 66.7% | ⚠️ |
+| contrib/sqs/consumer | 61.6% | ⚠️ |
+
+**Target: 80% coverage across all packages**
+
+Run tests with coverage:
+```bash
+make test-coverage         # Generates coverage.html
+make test                  # Full test suite (requires DB - run 'make up' first)
+make test-short            # Unit tests only (no DB required)
+```
+
+To improve coverage in areas marked with ⚠️:
+- `core`: Add edge case tests for cleanup context and concurrent workers
+- `schema`: Add tests for schema generation with various configurations
+- `contrib/sqs/consumer`: Add tests for MessageConcurrency and error scenarios
+
 ## Architecture
 
 o4x consists of two independent components:

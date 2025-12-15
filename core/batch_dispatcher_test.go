@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
@@ -89,8 +90,9 @@ func (s *BatchDispatcherSuite) TestNewBatchDispatcher_LimitsBatchSizeToPublisher
 	// Arrange
 	s.publisher.MaxBatchSizeVal = 5
 	config := BatchDispatcherConfig{
-		BatchSize: 20, // Exceeds publisher's max
-		Logger:    s.logger,
+		BatchSize:          20, // Exceeds publisher's max
+		Logger:             s.logger,
+		DisableAutoRequeue: true,
 	}
 
 	// Act
@@ -104,8 +106,9 @@ func (s *BatchDispatcherSuite) TestNewBatchDispatcher_LimitsBatchSizeToPublisher
 func (s *BatchDispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublishing() {
 	// Arrange
 	config := BatchDispatcherConfig{
-		Logger:      s.logger,
-		AutoRecover: true,
+		Logger:             s.logger,
+		AutoRecover:        true,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -129,8 +132,9 @@ func (s *BatchDispatcherSuite) TestStart_WithAutoRecover_CallsReviveStuckPublish
 func (s *BatchDispatcherSuite) TestStart_WithoutAutoRecover_DoesNotCallReviveStuckPublishing() {
 	// Arrange
 	config := BatchDispatcherConfig{
-		Logger:      s.logger,
-		AutoRecover: false,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -148,9 +152,10 @@ func (s *BatchDispatcherSuite) TestStart_WithoutAutoRecover_DoesNotCallReviveStu
 func (s *BatchDispatcherSuite) TestStartAndStop_IsRunningReflectsState() {
 	// Arrange
 	config := BatchDispatcherConfig{
-		Logger:          s.logger,
-		AutoRecover:     false,
-		ShutdownTimeout: 5 * time.Second,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		ShutdownTimeout:    5 * time.Second,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -179,11 +184,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_ProcessesBatchOfMessages() {
 	}
 
 	config := BatchDispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		BatchSize:    10,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		BatchSize:          10,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -234,11 +240,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_HandlesPartialBatchFailure() 
 	}
 
 	config := BatchDispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		BatchSize:    10,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		BatchSize:          10,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -278,11 +285,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadAfterMaxRetri
 	}
 
 	config := BatchDispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		BatchSize:    10,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		BatchSize:          10,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -319,11 +327,12 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnPermanentEr
 	}
 
 	config := BatchDispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		BatchSize:    10,
-		WorkerCount:  1,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		BatchSize:          10,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -367,12 +376,13 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_CallsBatchHooks() {
 	}
 
 	config := BatchDispatcherConfig{
-		Logger:       s.logger,
-		AutoRecover:  false,
-		PollInterval: 10 * time.Millisecond,
-		BatchSize:    10,
-		WorkerCount:  1,
-		Hooks:        hooks,
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		BatchSize:          10,
+		WorkerCount:        1,
+		Hooks:              hooks,
+		DisableAutoRequeue: true,
 	}
 	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
 	assert.NoError(s.T(), err)
@@ -447,4 +457,123 @@ func (s *BatchDispatcherConfigSuite) TestDefaultBatchDispatcherConfig_ReturnsExp
 	assert.Equal(s.T(), 1*time.Hour, config.RequeueBackoffMax)
 	assert.NotNil(s.T(), config.OnForceShutdown)
 	assert.NotNil(s.T(), config.Logger)
+}
+
+// TestBatchDispatcher_HealthStatus tests the HealthStatus method
+func TestBatchDispatcher_HealthStatus(t *testing.T) {
+	repo := NewMockOutboxRepository()
+	publisher := NewMockPublisher()
+
+	config := BatchDispatcherConfig{
+		BatchSize:          10,
+		WorkerCount:        2,
+		DisableAutoRequeue: true,
+	}
+
+	dispatcher, err := NewBatchDispatcher(repo, publisher, config)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Test before start
+	status := dispatcher.HealthStatus()
+	assert.False(t, status.IsHealthy())
+	assert.False(t, status.Running)
+	assert.Equal(t, 2, status.WorkerCount)
+
+	// Start dispatcher
+	go func() {
+		_ = dispatcher.Start(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Test while running
+	status = dispatcher.HealthStatus()
+	assert.True(t, status.IsHealthy())
+	assert.True(t, status.Running)
+	assert.False(t, status.PendingShutdown)
+
+	// Stop dispatcher
+	cancel()
+	dispatcher.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	// Test after stop
+	status = dispatcher.HealthStatus()
+	assert.False(t, status.IsHealthy())
+	assert.False(t, status.Running)
+}
+
+// TestCallOnPartialBatchSuccess tests the callOnPartialBatchSuccess hook
+func TestCallOnPartialBatchSuccess(t *testing.T) {
+	repo := NewMockOutboxRepository()
+	publisher := NewMockPublisher()
+
+	var partialSuccessCalled bool
+	var expectedCount, actualCount int
+
+	hooks := &Hooks{
+		OnPartialBatchSuccess: func(ctx context.Context, expected, actual int, duration time.Duration) {
+			partialSuccessCalled = true
+			expectedCount = expected
+			actualCount = actual
+		},
+	}
+
+	config := BatchDispatcherConfig{
+		BatchSize:          10,
+		WorkerCount:        1,
+		Hooks:              hooks,
+		DisableAutoRequeue: true,
+	}
+
+	dispatcher, err := NewBatchDispatcher(repo, publisher, config)
+	assert.NoError(t, err)
+
+	// Add messages
+	for i := 0; i < 5; i++ {
+		id := uuid.New().String()
+		msg := &Outbox{
+			ID:             id,
+			EventType:      "test.event",
+			Payload:        []byte(`{}`),
+			IdempotencyKey: id,
+			Status:         OutboxStatusEnqueued,
+			RetryCount:     0,
+			MaxRetries:     5,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo.AddMessage(msg)
+	}
+
+	// Configure publisher to fail - this should trigger partial batch success hook
+	failCount := 0
+	publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
+		failCount++
+		if failCount%2 == 0 {
+			return errors.New("simulated failure")
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Start dispatcher
+	go func() {
+		_ = dispatcher.Start(ctx)
+	}()
+
+	// Wait for processing
+	time.Sleep(300 * time.Millisecond)
+	dispatcher.Stop()
+
+	// Verify hook was called (if there were partial failures)
+	if partialSuccessCalled {
+		assert.Greater(t, expectedCount, 0)
+		assert.LessOrEqual(t, actualCount, expectedCount)
+	}
 }

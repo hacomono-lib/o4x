@@ -347,3 +347,36 @@ func (s *TypedHandlerSuite) TestTypedHandler_WorksWithMapPayload() {
 	assert.Equal(s.T(), "value", receivedPayload["key"])
 	assert.Equal(s.T(), float64(123), receivedPayload["number"])
 }
+
+// TestEventTypeRouter_EventTypes tests the EventTypes() method
+func TestEventTypeRouter_EventTypes(t *testing.T) {
+	router := NewEventTypeRouter()
+
+	// Register some handlers
+	router.Register("order.created", HandlerFunc(func(ctx context.Context, msg *SQSMessage) error {
+		return nil
+	}))
+	router.Register("user.registered", HandlerFunc(func(ctx context.Context, msg *SQSMessage) error {
+		return nil
+	}))
+
+	eventTypes := router.EventTypes()
+	if len(eventTypes) != 2 {
+		t.Errorf("expected 2 event types, got %d", len(eventTypes))
+	}
+
+	// Check that both event types are present
+	hasOrder := false
+	hasUser := false
+	for _, et := range eventTypes {
+		if et == "order.created" {
+			hasOrder = true
+		}
+		if et == "user.registered" {
+			hasUser = true
+		}
+	}
+	if !hasOrder || !hasUser {
+		t.Error("missing expected event types")
+	}
+}
