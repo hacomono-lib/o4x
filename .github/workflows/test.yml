@@ -63,7 +63,7 @@ jobs:
 
       - name: Run tests with coverage
         env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/o4x?sslmode=disable
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/o4x?sslmode=disable
           SQS_ENDPOINT: http://localhost:4566
           AWS_REGION: us-east-1
           AWS_ACCESS_KEY_ID: test
