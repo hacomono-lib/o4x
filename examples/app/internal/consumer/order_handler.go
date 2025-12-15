@@ -115,19 +115,16 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 		"order_id", event.OrderID,
 	)
 
-	// Simulate DB operation delay
-	h.sleepConfig.Sleep()
-
-	// Idempotent processing using InboxRepository
+	// DB operation pattern: Begin -> TryStart -> process -> Complete -> Commit
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Check idempotency using InboxRepository
+	// Check idempotency using InboxRepository (within transaction)
 	inboxTx := h.inbox.WithTx(tx)
-	shouldProcess, err := inboxTx.TryStart(ctx, "OrderConfirmedHandler", msg.MessageID)
+	shouldProcess, err := inboxTx.TryStart(ctx, "order", msg.MessageID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
@@ -138,6 +135,9 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 		)
 		return nil
 	}
+
+	// Simulate DB operation delay (within transaction)
+	h.sleepConfig.Sleep()
 
 	// Insert order confirmation record
 	query := `
@@ -150,8 +150,12 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	}
 
 	// Mark as completed in inbox
-	if err := inboxTx.Complete(ctx, "OrderConfirmedHandler", msg.MessageID); err != nil {
+	if err := inboxTx.Complete(ctx, "order", msg.MessageID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	h.logger.Info("order.confirmed event processed successfully",
@@ -159,10 +163,6 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 		"order_id", event.OrderID,
 		"analytics_updated", true,
 	)
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
 
 	return nil
 }

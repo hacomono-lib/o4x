@@ -417,8 +417,7 @@ log.Printf("Deleted %d inbox messages", completedCount)
 ```
 
 **Recommended Retention:**
-- Completed messages: 7-30 days
-- Processing messages: 30-90 days (for investigation)
+- Completed messages: 7-30 days (for audit trail and debugging)
 
 Schedule cleanup with cron:
 

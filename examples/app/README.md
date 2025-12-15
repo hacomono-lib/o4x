@@ -338,23 +338,66 @@ go run benchmark/main.go \
 
 ### Expected Performance
 
-On a standard development machine:
+**IMPORTANT**: These benchmarks measure **API response time only** (Outbox INSERT). They do NOT include asynchronous consumer processing time. This is by design in the Transactional Outbox Pattern - the API returns immediately after writing to the outbox, while dispatcher and consumer process messages asynchronously.
+
+For example, the notification benchmark shows ~4ms latency, but actual email sending (consumer-side) takes 250ms-2s as configured by `NOTIFICATION_EMAIL_SLEEP_MIN/MAX`. The consumer processing happens asynchronously and does not affect API response time.
+
+Benchmarks run on a development machine (Apple Silicon M-series, 8 cores) with Docker Compose resource constraints:
+- **API Server**: 1.0 vCPU / 2GB memory
+- **Dispatcher**: 0.5 vCPU / 1GB memory (cpu_quota: 50000, cpu_period: 100000)
+- **Consumers**: 0.5 vCPU / 1GB memory each (cpu_quota: 50000, cpu_period: 100000)
 
 ```
-=== Benchmark Results ===
+=== System Info ===
+OS:                 darwin
+Arch:               arm64
+CPU:                8 cores
+Go:                 go1.25.0
+
+=== User Registration Benchmark (1000 requests, concurrency 10) ===
 Total Requests:     1000
 Success Requests:   1000
 Failed Requests:    0
-Duration:           2.5s
-Requests/sec:       400.00
+Duration:           419.53ms
+Requests/sec:       2383.60
 
 === Latency ===
-Min:                5ms
-Avg:                25ms
-Max:                100ms
-P50:                20ms
-P95:                50ms
-P99:                80ms
+Min:                1.86ms
+Avg:                4.18ms
+Max:                61.31ms
+P50:                3.19ms
+P95:                7.84ms
+P99:                50.75ms
+
+=== Notification Benchmark (1000 requests, concurrency 10) ===
+Total Requests:     1000
+Success Requests:   1000
+Failed Requests:    0
+Duration:           411.56ms
+Requests/sec:       2429.78
+
+=== Latency ===
+Min:                1.75ms
+Avg:                4.11ms
+Max:                24.10ms
+P50:                3.42ms
+P95:                9.24ms
+P99:                17.23ms
+
+=== Order Creation Benchmark (1000 requests, concurrency 10) ===
+Total Requests:     1000
+Success Requests:   1000
+Failed Requests:    0
+Duration:           590.38ms
+Requests/sec:       1693.84
+
+=== Latency ===
+Min:                3.47ms
+Avg:                5.89ms
+Max:                23.43ms
+P50:                5.39ms
+P95:                9.15ms
+P99:                14.90ms
 ```
 
 ## Testing Scenarios

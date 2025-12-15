@@ -28,6 +28,9 @@ services:
       SERVICES: sqs
       DEFAULT_REGION: us-east-1
       DEBUG: 1
+      HOSTNAME: localstack
+      HOSTNAME_EXTERNAL: localstack
+      SQS_ENDPOINT_STRATEGY: off
     volumes:
       - localstack_data:/var/lib/localstack
       - ./init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
@@ -47,9 +50,14 @@ services:
       PORT: 8000
     ports:
       - "18000:8000"
-    cpu_count: 1
-    mem_limit: 2g
-    mem_reservation: 512m
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,7 +66,6 @@ services:
     build:
       context: ../..
       dockerfile: examples/app/Dockerfile.dispatcher
-    container_name: o4x-app-dispatcher
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
       SQS_ENDPOINT: http://localstack:4566
@@ -67,11 +74,13 @@ services:
       USER_QUEUE_URL: http://localstack:4566/000000000000/o4x-events-user
       AWS_REGION: us-east-1
       HEALTH_PORT: 8080
-    ports:
-      - "18080:8080"
-    cpu_count: 1
-    mem_limit: 2g
-    mem_reservation: 512m
+      GOMAXPROCS: "1"
+    # Resource limits (0.5 vCPU / 1GB memory)
+    # Using v1 format for full CPU quota control
+    cpu_quota: 50000  # 0.5 CPU (50000 / 100000)
+    cpu_period: 100000
+    mem_limit: 1G
+    mem_reservation: 256M
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,7 +91,6 @@ services:
     build:
       context: ../..
       dockerfile: examples/app/Dockerfile.consumer
-    container_name: o4x-app-consumer-order
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
       SQS_ENDPOINT: http://localstack:4566
@@ -95,11 +103,14 @@ services:
       ORDER_CREATED_SLEEP_MAX: 80ms
       ORDER_CONFIRMED_SLEEP_MIN: 10ms
       ORDER_CONFIRMED_SLEEP_MAX: 40ms
-    ports:
-      - "18081:8081"
-    cpu_count: 1
-    mem_limit: 2g
-    mem_reservation: 512m
+      GOMAXPROCS: "1"
+    # FIFO queue requires MessageConcurrency=1 for ordering guarantees
+    command: ["./consumer", "--workers", "1", "--message-concurrency", "1"]
+    # Resource limits (0.5 vCPU / 1GB memory)
+    cpu_quota: 50000
+    cpu_period: 100000
+    mem_limit: 1G
+    mem_reservation: 256M
     depends_on:
       postgres:
         condition: service_healthy
@@ -110,7 +121,6 @@ services:
     build:
       context: ../..
       dockerfile: examples/app/Dockerfile.consumer
-    container_name: o4x-app-consumer-notification
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
       SQS_ENDPOINT: http://localstack:4566
@@ -125,11 +135,12 @@ services:
       NOTIFICATION_SMS_SLEEP_MAX: 500ms
       NOTIFICATION_PUSH_SLEEP_MIN: 50ms
       NOTIFICATION_PUSH_SLEEP_MAX: 300ms
-    ports:
-      - "18082:8082"
-    cpu_count: 2
-    mem_limit: 2g
-    mem_reservation: 512m
+      GOMAXPROCS: "1"
+    # Resource limits (0.5 vCPU / 1GB memory)
+    cpu_quota: 50000
+    cpu_period: 100000
+    mem_limit: 1G
+    mem_reservation: 256M
     depends_on:
       postgres:
         condition: service_healthy
@@ -140,7 +151,6 @@ services:
     build:
       context: ../..
       dockerfile: examples/app/Dockerfile.consumer
-    container_name: o4x-app-consumer-user
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
       SQS_ENDPOINT: http://localstack:4566
@@ -153,11 +163,34 @@ services:
       USER_REGISTERED_SLEEP_MAX: 20ms
       USER_UPDATED_SLEEP_MIN: 10ms
       USER_UPDATED_SLEEP_MAX: 30ms
-    ports:
-      - "18083:8083"
-    cpu_count: 1
-    mem_limit: 2g
-    mem_reservation: 512m
+      GOMAXPROCS: "1"
+    # Resource limits (0.5 vCPU / 1GB memory)
+    cpu_quota: 50000
+    cpu_period: 100000
+    mem_limit: 1G
+    mem_reservation: 256M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  dispatcher-bench:
+    build:
+      context: ../..
+      dockerfile: examples/app/Dockerfile.dispatcher
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/o4x?sslmode=disable
+      SQS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      HEALTH_PORT: 8080
+      GOMAXPROCS: "1"
+    command: ["./dispatcher-bench", "--workers", "${WORKERS:-2}"]
+    # Resource limits (0.5 vCPU / 1GB memory)
+    cpu_quota: 50000
+    cpu_period: 100000
+    mem_limit: 1G
+    mem_reservation: 256M
     depends_on:
       postgres:
         condition: service_healthy

@@ -319,9 +319,8 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 2. **External API with idempotency key support**: Use `InboxRepository` + pass message_id as idempotency key ✅
 3. **External API without idempotency support**: **Don't use async messaging - handle synchronously instead** ⛔
 4. **Prefer transaction pattern**: Safer default unless performance is critical
-5. Set cleanup TTLs via `InboxCleaner.DeleteOlderThan()` (completed: 7-30d, processing: 30-90d)
-6. Monitor stuck messages in 'processing' status (indicates handler crashes)
-7. **Important**: Return `nil` on duplicates, not an error
+5. Set cleanup TTLs via `InboxCleaner.DeleteOlderThan()` (completed: 7-30d)
+6. **Important**: Return `nil` on duplicates, not an error
 
 **consumer_name Definition**
 
@@ -475,4 +474,4 @@ status.IsStale(5 * time.Minute)  // no messages processed in 5min
 
 **Batch Operations**: `UpdateBatchToPublished` returns success count. Partial success allowed.
 
-**Database Cleanup**: Use `OutboxCleaner.DeleteOlderThan()` and `InboxCleaner.DeleteOlderThan()` periodically (PUBLISHED > 7d, DEAD > 30d, completed > 7d, processing > 30d).
+**Database Cleanup**: Use `OutboxCleaner.DeleteOlderThan()` and `InboxCleaner.DeleteOlderThan()` periodically (PUBLISHED > 7d, DEAD > 30d, completed > 7-30d).

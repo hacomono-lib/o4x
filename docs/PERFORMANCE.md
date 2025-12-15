@@ -2,6 +2,12 @@
 
 This guide helps you optimize o4x for different workloads and throughput requirements.
 
+## ⚠️ Important Notice
+
+This document provides **general tuning guidelines** based on configuration parameters and their trade-offs.
+
+**For benchmark results**, see [docs/benchmarks/](./benchmarks/) directory. Note that benchmark results are environment-specific and should not be extrapolated to production without validation.
+
 ## Table of Contents
 
 - [Configuration Parameters](#configuration-parameters)
@@ -9,8 +15,10 @@ This guide helps you optimize o4x for different workloads and throughput require
 - [Dispatcher Tuning](#dispatcher-tuning)
 - [Batch Dispatcher Tuning](#batch-dispatcher-tuning)
 - [Consumer Tuning](#consumer-tuning)
+- [Consumer Scaling](#consumer-scaling)
 - [Monitoring and Metrics](#monitoring-and-metrics)
 - [Common Scenarios](#common-scenarios)
+- [Example App Benchmarks](#example-app-benchmarks)
 
 ## Configuration Parameters
 
@@ -371,6 +379,79 @@ consumerConfig.VisibilityTimeout = 120
 
 **Expected performance**: 20-50 messages/second, minimal resource usage
 
+## Consumer Scaling
+
+### Horizontal Scaling
+
+Multiple consumer instances can process messages from the same queue concurrently.
+
+**Benefits:**
+- Increased throughput capacity
+- Fault tolerance (if one instance fails, others continue)
+- Shared idempotency tracking via `consumer_name`
+
+**Constraints:**
+- **Standard Queue**: Supports horizontal scaling (no ordering guarantees)
+- **FIFO Queue**: Order processing requires `MessageConcurrency=1` per instance
+- All instances must use the same `consumer_name` for proper idempotency tracking
+
+### Scaling Strategies
+
+**Standard Queue (No Ordering Required)**:
+```go
+// Configuration per instance
+config := consumer.ServiceConfig{
+    QueueURL:           queueURL,
+    WorkerCount:        5,
+    MessageConcurrency: 10,  // Parallel processing
+}
+
+// Deploy multiple instances for increased capacity
+// Actual scaling characteristics depend on your specific environment
+```
+
+**FIFO Queue (Ordering Required)**:
+```go
+// Configuration per instance
+config := consumer.ServiceConfig{
+    QueueURL:           queueURL,
+    WorkerCount:        5,
+    MessageConcurrency: 1,  // REQUIRED: Sequential processing
+}
+
+// Vertical scaling often preferred (increase resources per instance)
+// Horizontal scaling effectiveness depends on message distribution patterns
+```
+
+### Idempotency with Multiple Instances
+
+When scaling consumers horizontally, all instances must share the same `consumer_name` to ensure exactly-once processing:
+
+```go
+// CORRECT: All instances use the same consumer_name
+inboxRepo := pgx.NewInboxRepository(pool)
+ok, err := inboxRepo.TryStart(ctx, "notification-service", msg.MessageID)
+```
+
+**How it works:**
+- `consumer_inbox` table uses composite primary key: `(consumer_name, message_id)`
+- Same `message_id` can only be processed once per `consumer_name`
+- Different instances of the same service share the `consumer_name`
+
+### Scaling Considerations
+
+**Factors Affecting Scaling Effectiveness:**
+- Database connection pool size
+- Message broker throughput and characteristics
+- Handler processing time
+- Network latency and bandwidth
+- Queue type (Standard vs FIFO)
+- Message distribution patterns
+
+**Recommendation**: Always validate scaling behavior in production-like environments with realistic workloads.
+
+→ **For example benchmark results**, see [Benchmark Results](./benchmarks/) (note: environment-specific)
+
 ## Troubleshooting
 
 ### High CPU Usage
@@ -461,3 +542,38 @@ WHERE tablename = 'outbox';
 Expected indexes:
 - `idx_outbox_status_created_at` (for polling)
 - `idx_outbox_status_next_retry_at` (for RequeueFailed)
+
+## Example App Benchmarks
+
+The `examples/app` directory contains a complete working example with benchmark scripts and performance testing utilities.
+
+### Running Benchmarks
+
+```bash
+cd examples/app
+
+# Start all services
+./scripts/start.sh
+
+# Run benchmark with default settings (200 requests, concurrency 20)
+./scripts/benchmark.sh
+
+# Scale consumers and re-test (Standard queues only)
+docker-compose up -d --scale consumer-notification=5
+./scripts/benchmark.sh
+
+# Return to single instance
+docker-compose down
+./scripts/start.sh
+```
+
+### Important Notes
+
+- **Environment-Specific**: Benchmarks run in LocalStack + docker-compose environment
+- **FIFO Queue Caution**: Do NOT scale the order consumer (FIFO queue) with `--scale`
+- For FIFO queues, vertical scaling (increase resources) is often preferred
+- Standard queues (notification, user) support horizontal scaling
+
+→ **For benchmark results and detailed analysis**, see [docs/benchmarks/localstack-benchmark-results.md](./benchmarks/localstack-benchmark-results.md)
+
+→ **For operational procedures**, see [examples/app/scripts/README.md](../examples/app/scripts/README.md)

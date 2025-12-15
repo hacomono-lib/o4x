@@ -57,6 +57,22 @@ func (r *NotificationRepository) UpdateStatus(ctx context.Context, tx pgx.Tx, id
 	return nil
 }
 
+func (r *NotificationRepository) UpdateStatusWithPool(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, status domain.NotificationStatus) error {
+	query := `
+		UPDATE notifications
+		SET status = $1, updated_at = NOW()
+		WHERE id = $2
+	`
+	result, err := pool.Exec(ctx, query, status, id)
+	if err != nil {
+		return fmt.Errorf("failed to update notification status: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("notification not found: %s", id)
+	}
+	return nil
+}
+
 func (r *NotificationRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Notification, error) {
 	query := `
 		SELECT id, type, recipient, subject, body, status, created_at, updated_at

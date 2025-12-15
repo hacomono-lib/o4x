@@ -68,28 +68,11 @@ func (h *NotificationEmailHandler) Handle(ctx context.Context, msg *consumer.SQS
 		"recipient", event.Recipient,
 	)
 
-	// Simulate email sending delay (external API call)
-	h.sleepConfig.Sleep()
+	// External API pattern (auto-commit): TryStart -> API call -> Complete
+	// No transaction needed for external API calls
 
-	// Simulate random failures for testing retry mechanism
-	if h.simulateFailure && rand.Float64() < h.failureRate {
-		h.logger.Warn("simulated email sending failure (will retry)",
-			"message_id", msg.MessageID,
-			"notification_id", event.NotificationID,
-		)
-		return fmt.Errorf("simulated email sending failure")
-	}
-
-	// Idempotent processing using InboxRepository
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	// Check idempotency using InboxRepository
-	inboxTx := h.inbox.WithTx(tx)
-	shouldProcess, err := inboxTx.TryStart(ctx, "NotificationEmailHandler", msg.MessageID)
+	// Check idempotency using InboxRepository (auto-commit)
+	shouldProcess, err := h.inbox.TryStart(ctx, "notification", msg.MessageID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
@@ -101,13 +84,25 @@ func (h *NotificationEmailHandler) Handle(ctx context.Context, msg *consumer.SQS
 		return nil
 	}
 
+	// Simulate email sending via external API (after TryStart)
+	h.sleepConfig.Sleep()
+
+	// Simulate random failures for testing retry mechanism
+	if h.simulateFailure && rand.Float64() < h.failureRate {
+		h.logger.Warn("simulated email sending failure (will retry)",
+			"message_id", msg.MessageID,
+			"notification_id", event.NotificationID,
+		)
+		return fmt.Errorf("simulated email sending failure")
+	}
+
 	// Update notification status (idempotent - safe to retry)
-	if err := h.notificationRepo.UpdateStatus(ctx, tx, event.NotificationID, domain.NotificationStatusSent); err != nil {
+	if err := h.notificationRepo.UpdateStatusWithPool(ctx, h.pool, event.NotificationID, domain.NotificationStatusSent); err != nil {
 		return fmt.Errorf("failed to update notification status: %w", err)
 	}
 
-	// Mark as completed in inbox
-	if err := inboxTx.Complete(ctx, "NotificationEmailHandler", msg.MessageID); err != nil {
+	// Mark as completed in inbox (auto-commit)
+	if err := h.inbox.Complete(ctx, "notification", msg.MessageID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
@@ -116,10 +111,6 @@ func (h *NotificationEmailHandler) Handle(ctx context.Context, msg *consumer.SQS
 		"notification_id", event.NotificationID,
 		"recipient", event.Recipient,
 	)
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
 
 	return nil
 }
@@ -153,19 +144,11 @@ func (h *NotificationSMSHandler) Handle(ctx context.Context, msg *consumer.SQSMe
 		"recipient", event.Recipient,
 	)
 
-	// Simulate SMS sending via external API
-	h.sleepConfig.Sleep()
+	// External API pattern (auto-commit): TryStart -> API call -> Complete
+	// No transaction needed for external API calls
 
-	// Idempotent processing using InboxRepository
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	// Check idempotency using InboxRepository
-	inboxTx := h.inbox.WithTx(tx)
-	shouldProcess, err := inboxTx.TryStart(ctx, "NotificationSMSHandler", msg.MessageID)
+	// Check idempotency using InboxRepository (auto-commit)
+	shouldProcess, err := h.inbox.TryStart(ctx, "notification", msg.MessageID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
@@ -177,14 +160,17 @@ func (h *NotificationSMSHandler) Handle(ctx context.Context, msg *consumer.SQSMe
 		return nil
 	}
 
+	// Simulate SMS sending via external API (after TryStart)
+	h.sleepConfig.Sleep()
+
 	h.logger.Info("sending SMS (simulated)",
 		"notification_id", event.NotificationID,
 		"recipient", event.Recipient,
 		"body_length", len(event.Body),
 	)
 
-	// Mark as completed in inbox
-	if err := inboxTx.Complete(ctx, "NotificationSMSHandler", msg.MessageID); err != nil {
+	// Mark as completed in inbox (auto-commit)
+	if err := h.inbox.Complete(ctx, "notification", msg.MessageID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
@@ -192,10 +178,6 @@ func (h *NotificationSMSHandler) Handle(ctx context.Context, msg *consumer.SQSMe
 		"message_id", msg.MessageID,
 		"notification_id", event.NotificationID,
 	)
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
 
 	return nil
 }
@@ -229,19 +211,11 @@ func (h *NotificationPushHandler) Handle(ctx context.Context, msg *consumer.SQSM
 		"recipient", event.Recipient,
 	)
 
-	// Simulate push notification sending
-	h.sleepConfig.Sleep()
+	// External API pattern (auto-commit): TryStart -> API call -> Complete
+	// No transaction needed for external API calls
 
-	// Idempotent processing using InboxRepository
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	// Check idempotency using InboxRepository
-	inboxTx := h.inbox.WithTx(tx)
-	shouldProcess, err := inboxTx.TryStart(ctx, "NotificationPushHandler", msg.MessageID)
+	// Check idempotency using InboxRepository (auto-commit)
+	shouldProcess, err := h.inbox.TryStart(ctx, "notification", msg.MessageID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
@@ -253,14 +227,17 @@ func (h *NotificationPushHandler) Handle(ctx context.Context, msg *consumer.SQSM
 		return nil
 	}
 
+	// Simulate push notification sending via external API (after TryStart)
+	h.sleepConfig.Sleep()
+
 	h.logger.Info("sending push notification (simulated)",
 		"notification_id", event.NotificationID,
 		"recipient", event.Recipient,
 		"subject", event.Subject,
 	)
 
-	// Mark as completed in inbox
-	if err := inboxTx.Complete(ctx, "NotificationPushHandler", msg.MessageID); err != nil {
+	// Mark as completed in inbox (auto-commit)
+	if err := h.inbox.Complete(ctx, "notification", msg.MessageID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
@@ -268,10 +245,6 @@ func (h *NotificationPushHandler) Handle(ctx context.Context, msg *consumer.SQSM
 		"message_id", msg.MessageID,
 		"notification_id", event.NotificationID,
 	)
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
 
 	return nil
 }

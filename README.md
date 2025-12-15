@@ -550,7 +550,8 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, config)
 | `MaxPollInterval` | 3200ms | Maximum polling interval during idle periods |
 | `WorkerCount` | 1 | Number of concurrent workers |
 | `AutoRecover` | true | Automatic recovery of stuck PUBLISHING messages at startup |
-| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. If 0, FAILED messages will not retry automatically |
+| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. **Required unless DisableAutoRequeue=true** |
+| `DisableAutoRequeue` | false | Explicitly disable automatic requeue. Use with caution |
 | `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |
 | `ForceTimeout` | 60s | Hard limit before forceful exit |
 | `CleanupTimeout` | 10s | Timeout for database cleanup operations during shutdown |
@@ -562,7 +563,8 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, config)
 | `PollInterval` | 100ms | How often to poll for new messages |
 | `BatchSize` | 10 | Messages per batch (max 10 for SQS) |
 | `WorkerCount` | 1 | Number of concurrent batch workers |
-| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. If 0, FAILED messages will not retry automatically |
+| `RequeueInterval` | **10s** | Interval for auto-requeue FAILED→ENQUEUED. **Required unless DisableAutoRequeue=true** |
+| `DisableAutoRequeue` | false | Explicitly disable automatic requeue. Use with caution |
 | `RequeueBackoffBase` | 1s | Base interval for exponential backoff on retry |
 | `RequeueBackoffMax` | 1h | Maximum backoff interval (caps exponential growth) |
 | `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |

@@ -18,8 +18,8 @@ RUN apk --no-cache add ca-certificates
 
 WORKDIR /app
 
-COPY --from=builder /app/consumer .
+COPY --from=builder /app/consumer ./bin/consumer
 
 EXPOSE 8081
 
-CMD ["./consumer", "--workers", "2"]
+CMD ["./bin/consumer", "--workers", "1", "--message-concurrency", "10"]

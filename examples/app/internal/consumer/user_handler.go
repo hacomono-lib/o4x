@@ -49,19 +49,16 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 		"email", event.Email,
 	)
 
-	// Simulate DB operation delay
-	h.sleepConfig.Sleep()
-
-	// Idempotent processing using InboxRepository
+	// DB operation pattern: Begin -> TryStart -> process -> Complete -> Commit
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Check idempotency using InboxRepository
+	// Check idempotency using InboxRepository (within transaction)
 	inboxTx := h.inbox.WithTx(tx)
-	shouldProcess, err := inboxTx.TryStart(ctx, "UserRegisteredHandler", msg.MessageID)
+	shouldProcess, err := inboxTx.TryStart(ctx, "user", msg.MessageID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
@@ -72,6 +69,9 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 		)
 		return nil
 	}
+
+	// Simulate DB operation delay (within transaction)
+	h.sleepConfig.Sleep()
 
 	// Insert welcome credit record
 	// This ensures we don't create duplicate welcome credits for the same message
@@ -85,8 +85,12 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	}
 
 	// Mark as completed in inbox
-	if err := inboxTx.Complete(ctx, "UserRegisteredHandler", msg.MessageID); err != nil {
+	if err := inboxTx.Complete(ctx, "user", msg.MessageID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	h.logger.Info("user.registered event processed successfully",
@@ -94,10 +98,6 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 		"user_id", event.UserID,
 		"credit_granted", 1000,
 	)
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
 
 	return nil
 }

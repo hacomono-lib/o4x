@@ -76,7 +76,7 @@ func main() {
 	// Initialize repository and publisher
 	repo := pgx.NewOutboxRepository(pool)
 
-	var publisher core.Publisher
+	var publisher core.BatchPublisher
 
 	if *multiQueue {
 		// Multi-queue mode: route event types to different queues
@@ -100,7 +100,7 @@ func main() {
 			"user_queue", userQueueURL,
 		)
 
-		publisher = sqspub.NewMultiQueuePublisher(sqsClient, router)
+		publisher = sqspub.NewMultiBatchPublisher(sqsClient, router)
 	} else {
 		// Single queue mode: all messages go to the order queue (default)
 		logger.Info("single queue mode", "queue_url", orderQueueURL)
@@ -117,14 +117,16 @@ func main() {
 		logger.Info("revived stuck publishing messages", "count", revived)
 	}
 
-	// Initialize dispatcher
-	dispatcher, err := core.NewDispatcher(repo, publisher, core.DispatcherConfig{
-		PollInterval: pollInterval,
-		WorkerCount:  *workerCount,
-		Logger:       logger,
+	// Initialize batch dispatcher
+	dispatcher, err := core.NewBatchDispatcher(repo, publisher, core.BatchDispatcherConfig{
+		PollInterval:    pollInterval,
+		BatchSize:       10, // Process messages in batches of 10
+		WorkerCount:     *workerCount,
+		RequeueInterval: 10 * time.Second, // Retry FAILED messages every 10 seconds
+		Logger:          logger,
 	})
 	if err != nil {
-		logger.Error("failed to create dispatcher", "error", err)
+		logger.Error("failed to create batch dispatcher", "error", err)
 		os.Exit(1)
 	}
 
@@ -138,9 +140,10 @@ func main() {
 	if *multiQueue {
 		mode = "multi-queue"
 	}
-	logger.Info("dispatcher started",
+	logger.Info("batch dispatcher started",
 		"mode", mode,
 		"worker_count", *workerCount,
+		"batch_size", 10,
 		"poll_interval", pollInterval,
 	)
 

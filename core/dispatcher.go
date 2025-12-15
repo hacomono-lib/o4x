@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -37,6 +38,11 @@ type DispatcherConfig struct {
 	// IMPORTANT: If set to 0, FAILED messages will NEVER be retried automatically.
 	// Recommended: 10s for normal workloads, 1s for high-priority messages.
 	RequeueInterval time.Duration
+	// DisableAutoRequeue explicitly disables automatic requeue of FAILED messages.
+	// If true, RequeueInterval validation is skipped and FAILED messages will NOT
+	// be retried automatically. Use with caution - only when an external system
+	// handles FAILED messages or for testing purposes.
+	DisableAutoRequeue bool
 	// Logger for dispatcher operations
 	Logger *slog.Logger
 	// Hooks for observability and metrics collection (optional)
@@ -100,6 +106,9 @@ func NewDispatcher(repo OutboxRepository, publisher Publisher, config Dispatcher
 	if config.CleanupTimeout < 0 {
 		return nil, ErrInvalidConfig
 	}
+	if config.RequeueInterval < 0 {
+		return nil, ErrInvalidConfig
+	}
 
 	// Apply defaults
 	if config.PollInterval == 0 {
@@ -134,6 +143,13 @@ func NewDispatcher(repo OutboxRepository, publisher Publisher, config Dispatcher
 			"force_timeout", config.ForceTimeout,
 			"adjusted_force_timeout", config.ShutdownTimeout*2)
 		config.ForceTimeout = config.ShutdownTimeout * 2
+	}
+
+	// CRITICAL: RequeueInterval must be set unless explicitly disabled
+	// Without requeue, FAILED messages will never retry
+	if config.RequeueInterval == 0 && !config.DisableAutoRequeue {
+		return nil, fmt.Errorf("%w: RequeueInterval must be > 0 (e.g., 10s for production, 500ms-1s for bench). "+
+			"FAILED messages will never retry without this. Set DisableAutoRequeue=true to explicitly disable", ErrInvalidConfig)
 	}
 
 	return &Dispatcher{
@@ -174,12 +190,6 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 					"Consider calling ReviveStuckPublishing manually at startup to prevent message loss.")
 			}
 		}()
-	}
-
-	// Warn if RequeueInterval is 0 (FAILED messages will never retry automatically)
-	if d.config.RequeueInterval == 0 {
-		d.config.Logger.WarnContext(ctx, "RequeueInterval is 0 - FAILED messages will not be retried automatically. "+
-			"Set RequeueInterval to enable automatic retries.")
 	}
 
 	d.config.Logger.InfoContext(ctx, "starting dispatcher",

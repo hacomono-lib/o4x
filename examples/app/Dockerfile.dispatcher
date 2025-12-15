@@ -9,8 +9,9 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build dispatcher
+# Build both dispatcher and dispatcher-bench
 RUN CGO_ENABLED=0 GOOS=linux go build -o /app/dispatcher ./examples/app/cmd/dispatcher
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/dispatcher-bench ./examples/app/cmd/dispatcher-bench
 
 FROM alpine:latest
 
@@ -18,8 +19,9 @@ RUN apk --no-cache add ca-certificates
 
 WORKDIR /app
 
-COPY --from=builder /app/dispatcher .
+COPY --from=builder /app/dispatcher ./bin/dispatcher
+COPY --from=builder /app/dispatcher-bench ./bin/dispatcher-bench
 
 EXPOSE 8080
 
-CMD ["./dispatcher", "--multi-queue", "--workers", "2"]
+CMD ["./bin/dispatcher", "--multi-queue", "--workers", "2"]
