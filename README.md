@@ -21,7 +21,6 @@ o4x provides reliable message delivery from PostgreSQL to SQS using the [transac
 [![Go Report Card](https://goreportcard.com/badge/github.com/hacomono-lib/o4x)](https://goreportcard.com/report/github.com/hacomono-lib/o4x)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/hacomono-lib/o4x/workflows/CI/badge.svg)](https://github.com/hacomono-lib/o4x/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/hacomono-lib/o4x/branch/main/graph/badge.svg)](https://codecov.io/gh/hacomono-lib/o4x)
 
 ## Features
 
