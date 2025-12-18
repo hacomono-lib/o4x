@@ -59,7 +59,7 @@ func (p *Publisher) Publish(ctx context.Context, msg *core.Outbox) error {
 
 // buildMessageAttributes creates SQS message attributes from outbox metadata
 func buildMessageAttributes(msg *core.Outbox) map[string]sqstypes.MessageAttributeValue {
-	return map[string]sqstypes.MessageAttributeValue{
+	attrs := map[string]sqstypes.MessageAttributeValue{
 		"event_type": {
 			DataType:    aws.String("String"),
 			StringValue: aws.String(msg.EventType),
@@ -73,6 +73,16 @@ func buildMessageAttributes(msg *core.Outbox) map[string]sqstypes.MessageAttribu
 			StringValue: aws.String(msg.IdempotencyKey),
 		},
 	}
+
+	// Include metadata if present (for tracing, custom headers, etc.)
+	if len(msg.Metadata) > 0 {
+		attrs["metadata"] = sqstypes.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: aws.String(string(msg.Metadata)),
+		}
+	}
+
+	return attrs
 }
 
 // buildSendMessageInput creates a SendMessageInput from an outbox message

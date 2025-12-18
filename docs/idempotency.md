@@ -29,7 +29,7 @@ Both o4x and SQS guarantee **at-least-once delivery**. Your consumer may receive
 ### 1. Does your handler involve external API calls?
 
 **YES** → Does the API support idempotency keys?
-- **YES** → Use **InboxRepository** + pass `msg.MessageID` as idempotency key ✅
+- **YES** → Use **InboxRepository** + pass `msg.IdempotencyKey` or `msg.EventID` as idempotency key ✅
 - **NO** → **Don't use async messaging** ⛔ (handle synchronously instead)
 
 **NO** → Continue to step 2
@@ -54,32 +54,38 @@ Examples: `ON CONFLICT DO NOTHING`, `UPDATE ... SET status = 'completed' WHERE i
 
 ### InboxRepository (Recommended)
 
-#### CRITICAL: TryStart is NOT Exclusive
+#### CRITICAL: IsProcessed is NOT Exclusive
 
-**`TryStart()` does NOT provide exclusivity or mutual exclusion semantics.**
+**`IsProcessed()` does NOT provide exclusivity or mutual exclusion semantics.**
 
-Multiple consumer workers MAY pass `TryStart()` concurrently for the same message.
+Multiple consumer workers MAY pass `IsProcessed()` concurrently for the same event.
 
 This behavior is intentional and correct. Handlers MUST be safe to run multiple times.
 
 **Why This Design:**
 - Primary control: SQS visibility timeout prevents concurrent processing
-- The inbox table represents **completed messages only**
+- The inbox table represents **completed events only**
 - In-flight processing is controlled by the message broker (SQS visibility timeout)
 - The only definitive point is `Complete()`
 
 ```text
-TryStart   : optimistic check (may pass concurrently)
-Complete   : final commit (single source of truth)
+IsProcessed : optimistic check (may pass concurrently)
+Complete    : final commit (single source of truth)
 ```
 
 **Implementation:**
-- `TryStart`: Optimistic check (no locking)
-- `Complete`: `INSERT ... ON CONFLICT DO NOTHING` (idempotent)
-- Returns `true` if NOT exists (proceed), `false` if exists (skip)
+- `IsProcessed()`: Optimistic check (no locking)
+  - Returns `true` if EXISTS (already completed, skip)
+  - Returns `false` if NOT EXISTS (not yet completed, proceed)
+- `Complete()`: `INSERT ... ON CONFLICT DO NOTHING` (idempotent)
 - Both `pgx` and `gorm` implementations use identical logic for consistency
 
-**Note:** The inbox table intentionally records completed messages only.
+**Note:** The inbox table intentionally records completed events only.
+
+**Design Rationale:**
+- **event_id vs message_id**: Uses Outbox event_id (stable logical identity), NOT SQS MessageID (changes on redelivery)
+- **IsProcessed vs TryStart**: IsProcessed accurately reflects implementation (check completion), TryStart falsely implied locking/starting
+- **No status field**: Inbox only tracks completion, not in-flight state (SQS handles that)
 
 #### Pattern 1: Transaction Support (Safest)
 
@@ -93,18 +99,19 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
     defer tx.Rollback(ctx)
 
     // Check idempotency (within transaction)
-    // CRITICAL: TryStart is an optimistic check, NOT an exclusive lock
+    // CRITICAL: IsProcessed is an optimistic check, NOT an exclusive lock
+    // CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID (changes on redelivery)
     inboxTx := inboxRepo.WithTx(tx)
-    ok, _ := inboxTx.TryStart(ctx, "order-service", msg.MessageID)
-    if !ok {
-        return nil // Already processed
+    processed, _ := inboxTx.IsProcessed(ctx, "order-service", msg.EventID)
+    if processed {
+        return nil // Already completed, skip
     }
 
     // Process message (same transaction)
     tx.Exec(ctx, "INSERT INTO orders ...")
 
     // Mark completed
-    inboxTx.Complete(ctx, "order-service", msg.MessageID)
+    inboxTx.Complete(ctx, "order-service", msg.EventID)
 
     return tx.Commit(ctx)
 })
@@ -112,8 +119,8 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 
 **Benefits:**
 - Atomic idempotency check with business logic
-- Race-safe duplicate detection via `(consumer_name, message_id)` primary key
-- Audit trail with processing status and timestamps
+- Race-safe duplicate detection via `(consumer_name, event_id)` primary key
+- Audit trail with completion timestamps
 - If transaction rolls back, message will be retried
 
 **Use Cases:**
@@ -130,9 +137,10 @@ inboxRepo := pgx.NewInboxRepository(pool)
 
 handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
     // Check idempotency (auto-commit)
-    ok, _ := inboxRepo.TryStart(ctx, "payment-service", msg.MessageID)
-    if !ok {
-        return nil // Already processed
+    // CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID (changes on redelivery)
+    processed, _ := inboxRepo.IsProcessed(ctx, "payment-service", msg.EventID)
+    if processed {
+        return nil // Already completed, skip
     }
 
     // Call external API with idempotency key
@@ -140,7 +148,12 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
         Amount:   stripe.Int64(event.Amount),
         Currency: stripe.String("usd"),
     }
-    params.SetIdempotencyKey(msg.MessageID) // CRITICAL: Use msg.MessageID
+
+    // Option 1: Use IdempotencyKey (if you generated UUID v4 at Outbox insertion)
+    params.SetIdempotencyKey(msg.IdempotencyKey)
+
+    // Option 2: Use EventID (UUID v7, if API accepts any UUID format)
+    // params.SetIdempotencyKey(msg.EventID.String())
 
     charge, err := client.Charges.New(params)
     if err != nil {
@@ -148,7 +161,7 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
     }
 
     // Mark completed
-    inboxRepo.Complete(ctx, "payment-service", msg.MessageID)
+    inboxRepo.Complete(ctx, "payment-service", msg.EventID)
     return nil
 })
 ```
@@ -303,19 +316,25 @@ Without idempotency keys, async processing **MUST NOT** be used.
 | Simple SMTP | ❌ No deduplication | ❌ **MUST use sync** |
 | Legacy payment gateways | ❌ Often no support | ❌ **MUST use sync** |
 
-### Pattern: Passing message_id as idempotency key
+### Pattern: Passing idempotency key to external API
 
 ```go
 handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
     var event PaymentEvent
     json.Unmarshal(msg.Body, &event)
 
-    // REQUIRED: Pass message_id as idempotency key to external API
+    // REQUIRED: Pass idempotency key to external API
+    // CRITICAL: Use msg.IdempotencyKey OR msg.EventID, NEVER msg.MessageID (changes on redelivery)
     params := &stripe.ChargeParams{
         Amount:   stripe.Int64(event.Amount),
         Currency: stripe.String("usd"),
     }
-    params.SetIdempotencyKey(msg.MessageID) // CRITICAL: Use msg.MessageID
+
+    // Option 1: Use IdempotencyKey (if you generated UUID v4 at Outbox insertion)
+    params.SetIdempotencyKey(msg.IdempotencyKey)
+
+    // Option 2: Use EventID (UUID v7, if API accepts any UUID format)
+    // params.SetIdempotencyKey(msg.EventID.String())
 
     charge, err := client.Charges.New(params)
     if err != nil {
@@ -356,7 +375,7 @@ func CreateOrder(ctx context.Context, order Order) error {
 
 ## consumer_name Definition
 
-The `consumer_name` parameter in `InboxRepository.TryStart()` is a **logical consumer identity** at the service or consumer-group level.
+The `consumer_name` parameter in `InboxRepository.IsProcessed()` is a **logical consumer identity** at the service or consumer-group level.
 
 ### What consumer_name IS:
 
@@ -381,25 +400,25 @@ The `consumer_name` parameter in `InboxRepository.TryStart()` is a **logical con
 
 ```go
 // CORRECT: All instances use same consumer_name
-ok, _ := inboxRepo.TryStart(ctx, "order-service", msg.MessageID)
+processed, _ := inboxRepo.IsProcessed(ctx, "order-service", msg.EventID)
 
 // WRONG: Different consumer_name per handler
-ok, _ := inboxRepo.TryStart(ctx, "OrderCreatedHandler", msg.MessageID) // ❌
-ok, _ := inboxRepo.TryStart(ctx, msg.EventType, msg.MessageID)         // ❌
+processed, _ := inboxRepo.IsProcessed(ctx, "OrderCreatedHandler", msg.EventID) // ❌
+processed, _ := inboxRepo.IsProcessed(ctx, msg.EventType, msg.EventID)         // ❌
 ```
 
 ## Best Practices
 
-1. **Always check IdempotencyKey** before processing
+1. **Always use InboxRepository** for idempotency tracking (recommended)
 2. **External APIs without idempotency support**: Do NOT use async messaging - handle synchronously instead ⛔
-3. **External APIs with idempotency support**: Pass `msg.MessageID` or `msg.IdempotencyKey` to the API
-4. **Use TTL for cleanup** - Processed keys don't need to live forever (7-30 days is typical)
-5. **Return nil for duplicates** - To ACK the message and remove it from the queue
-6. **Log duplicate detections** - For monitoring and debugging
-7. **Test duplicate scenarios** - Simulate message redelivery in your tests
-8. **Prefer transaction pattern**: Safer default unless performance is critical
-9. **Set cleanup TTLs** via `InboxCleaner.DeleteOlderThan()` (completed: 7-30d, processing: 30-90d)
-10. **Monitor stuck messages** in 'processing' status (indicates handler crashes)
+3. **External APIs with idempotency support**: Pass `msg.IdempotencyKey` (UUID v4) or `msg.EventID` (UUID v7) to the API
+4. **CRITICAL**: Always use `msg.EventID` for InboxRepository, NEVER `msg.MessageID` (changes on redelivery)
+5. **Use TTL for cleanup** - Processed keys don't need to live forever (7-30 days is typical)
+6. **Return nil for duplicates** - To ACK the message and remove it from the queue
+7. **Log duplicate detections** - For monitoring and debugging
+8. **Test duplicate scenarios** - Simulate message redelivery in your tests
+9. **Prefer transaction pattern**: Safer default unless performance is critical
+10. **Set cleanup TTLs** via `InboxRepository.DeleteOlderThan()` (completed: 7-30d)
 
 ## Cleanup
 

@@ -187,11 +187,13 @@ inboxRepo := pgx.NewInboxRepository(pool)
 - Indexes: `idx_outbox_status_created_at`, `idx_outbox_status_next_retry_at`
 
 **Consumer Inbox Table** (Consumer side, **RECOMMENDED** for idempotency):
-- **Primary Key**: `(consumer_name, message_id)` - Ensures exactly-once processing
-- `status` (TEXT: "processing", "completed"), `received_at`, `processed_at`
-- Index: `idx_consumer_inbox_status_received_at` (for cleanup queries)
+- **Primary Key**: `(consumer_name, event_id)` - Ensures exactly-once processing
+- **CRITICAL**: `event_id` is the Outbox event ID (logical identity), NOT SQS MessageID
+- `completed_at` (TIMESTAMPTZ) - Only tracks completion timestamp
+- Index: `idx_consumer_inbox_completed_at` (for cleanup queries)
 - Purpose: Atomic duplicate detection via composite primary key
-- Use `InboxRepository.TryStart()` and `Complete()` in handlers
+- Design: NO status field, NO locking - only tracks "completed or not"
+- Use `InboxRepository.IsProcessed()` and `Complete()` in handlers
 - Generate DDL: `make schema-inbox`
 
 ## SQS Integration
@@ -270,19 +272,20 @@ Without idempotency keys, async processing **MUST NOT** be used.
 - ✅ API deduplicates requests with same key
 - ✅ API returns same response for duplicate requests
 
-**Example: Passing message_id as idempotency key**
+**Example: Passing event_id as idempotency key**
 
 ```go
 handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
     var event PaymentEvent
     json.Unmarshal(msg.Body, &event)
 
-    // REQUIRED: Pass message_id as idempotency key to external API
+    // REQUIRED: Pass event_id (Outbox ID) as idempotency key to external API
+    // CRITICAL: Use msg.EventID (stable logical identity), NOT msg.MessageID (changes on redelivery)
     params := &stripe.ChargeParams{
         Amount:   stripe.Int64(event.Amount),
         Currency: stripe.String("usd"),
     }
-    params.SetIdempotencyKey(msg.MessageID) // CRITICAL: Use msg.MessageID
+    params.SetIdempotencyKey(msg.EventID.String()) // CRITICAL: Use msg.EventID
 
     charge, err := client.Charges.New(params)
     if err != nil {
@@ -297,7 +300,7 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 
 1. **Does your handler involve external API calls?**
    - YES → Does the API support idempotency keys?
-     - YES → Use **InboxRepository** + pass message_id as idempotency key ✅
+     - YES → Use **InboxRepository** + pass event_id as idempotency key ✅
      - NO → **Don't use async messaging** ⛔
    - NO → Continue to step 2
 
@@ -316,15 +319,16 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 #### Best Practices
 
 1. **DB operations only**: Use `InboxRepository` with transaction ✅
-2. **External API with idempotency key support**: Use `InboxRepository` + pass message_id as idempotency key ✅
+2. **External API with idempotency key support**: Use `InboxRepository` + pass event_id as idempotency key ✅
 3. **External API without idempotency support**: **Don't use async messaging - handle synchronously instead** ⛔
 4. **Prefer transaction pattern**: Safer default unless performance is critical
 5. Set cleanup TTLs via `InboxCleaner.DeleteOlderThan()` (completed: 7-30d)
 6. **Important**: Return `nil` on duplicates, not an error
+7. **CRITICAL**: Always use `msg.EventID` (Outbox ID) for idempotency, NEVER `msg.MessageID` (changes on redelivery)
 
 **consumer_name Definition**
 
-The `consumer_name` parameter in `InboxRepository.TryStart()` is a **logical consumer identity** at the service or consumer-group level.
+The `consumer_name` parameter in `InboxRepository.IsProcessed()` is a **logical consumer identity** at the service or consumer-group level.
 
 **What consumer_name IS:**
 - Logical service name (e.g., "order-service", "notification-service")
@@ -346,41 +350,47 @@ The `consumer_name` parameter in `InboxRepository.TryStart()` is a **logical con
 
 ```go
 // CORRECT: All instances use same consumer_name
-ok, _ := inboxRepo.TryStart(ctx, "order-service", msg.MessageID)
+processed, _ := inboxRepo.IsProcessed(ctx, "order-service", msg.EventID)
 
 // WRONG: Different consumer_name per handler
-ok, _ := inboxRepo.TryStart(ctx, "OrderCreatedHandler", msg.MessageID) // ❌
-ok, _ := inboxRepo.TryStart(ctx, msg.EventType, msg.MessageID)         // ❌
+processed, _ := inboxRepo.IsProcessed(ctx, "OrderCreatedHandler", msg.EventID) // ❌
+processed, _ := inboxRepo.IsProcessed(ctx, msg.EventType, msg.EventID)         // ❌
 ```
 
 #### InboxRepository Implementation Notes
 
-**CRITICAL: TryStart is NOT Exclusive**
+**CRITICAL: IsProcessed is NOT Exclusive**
 
-`TryStart()` does NOT provide exclusivity or mutual exclusion semantics.
+`IsProcessed()` does NOT provide exclusivity or mutual exclusion semantics.
 
-Multiple consumer workers MAY pass `TryStart()` concurrently for the same message.
+Multiple consumer workers MAY pass `IsProcessed()` concurrently for the same event.
 
 This behavior is intentional and correct. Handlers MUST be safe to run multiple times.
 
 **Why This Design:**
 - Primary control: SQS visibility timeout prevents concurrent processing
-- The inbox table represents **completed messages only**
+- The inbox table represents **completed events only**
 - In-flight processing is controlled by the message broker (e.g. SQS visibility timeout)
 - The only definitive point is `Complete()`
 
 ```text
-TryStart   : optimistic check (may pass concurrently)
-Complete   : final commit (single source of truth)
+IsProcessed : optimistic check (may pass concurrently)
+Complete    : final commit (single source of truth)
 ```
 
 **Implementation:**
-- `TryStart`: Simple `SELECT EXISTS` check (no locking)
-- `Complete`: `INSERT ... ON CONFLICT DO NOTHING` (idempotent)
-- Returns `true` if NOT exists (proceed), `false` if exists (skip)
+- `IsProcessed()`: Simple `SELECT EXISTS` check (no locking)
+  - Returns `true` if EXISTS (already completed, skip)
+  - Returns `false` if NOT EXISTS (not yet completed, proceed)
+- `Complete()`: `INSERT ... ON CONFLICT DO NOTHING` (idempotent)
 - Both `pgx` and `gorm` implementations use identical logic for consistency
 
-**Note:** The inbox table intentionally records completed messages only.
+**Note:** The inbox table intentionally records completed events only.
+
+**Design Rationale:**
+- **event_id vs message_id**: Uses Outbox event_id (stable logical identity), NOT SQS MessageID (changes on redelivery)
+- **IsProcessed vs TryStart**: IsProcessed accurately reflects implementation (check completion), TryStart falsely implied locking/starting
+- **No status field**: Inbox only tracks completion, not in-flight state (SQS handles that)
 
 → **For complete idempotency patterns, code examples, and decision tree**, see [docs/idempotency.md](docs/idempotency.md)
 
@@ -435,7 +445,8 @@ Call once at startup:
 
 Consumer side:
 - No manual recovery needed
-- Messages with status=`processing` in `consumer_inbox` naturally retry when SQS redelivers
+- In-flight events (not yet in `consumer_inbox`) naturally retry when SQS redelivers
+- Completed events (in `consumer_inbox`) are skipped via `IsProcessed()` check
 
 ### Health Checks
 

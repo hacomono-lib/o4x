@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,18 +19,18 @@ const (
 	queryInboxCheckExists = `
 		SELECT EXISTS(
 			SELECT 1 FROM %s
-			WHERE consumer_name = $1 AND message_id = $2
+			WHERE consumer_name = $1 AND event_id = $2
 		)`
 
 	queryInboxComplete = `
-		INSERT INTO %s (consumer_name, message_id, completed_at)
+		INSERT INTO %s (consumer_name, event_id, completed_at)
 		VALUES ($1, $2, now())
-		ON CONFLICT (consumer_name, message_id) DO NOTHING`
+		ON CONFLICT (consumer_name, event_id) DO NOTHING`
 
-	queryInboxGetByMessageID = `
-		SELECT consumer_name, message_id, completed_at
+	queryInboxGetByEventID = `
+		SELECT consumer_name, event_id, completed_at
 		FROM %s
-		WHERE consumer_name = $1 AND message_id = $2`
+		WHERE consumer_name = $1 AND event_id = $2`
 
 	queryInboxDeleteOlderThan = `
 		DELETE FROM %s
@@ -67,8 +68,8 @@ func NewInboxRepository(pool *pgxpool.Pool, opts ...Option) *InboxRepository {
 //	defer tx.Rollback(ctx)
 //
 //	txRepo := repo.WithTx(tx)
-//	ok, _ := txRepo.TryStart(ctx, "OrderHandler", msg.MessageID)
-//	if !ok { return nil }
+//	processed, _ := txRepo.IsProcessed(ctx, "OrderHandler", msg.EventID)
+//	if processed { return nil }
 //
 //	// Business logic
 //	tx.Exec(ctx, "INSERT INTO orders ...")
@@ -82,85 +83,91 @@ func (r *InboxRepository) WithTx(tx pgx.Tx) *InboxRepository {
 	}
 }
 
-// TryStart checks if this message has already been processed.
+// IsProcessed checks if this event has already been completed.
 //
-// **CRITICAL: TryStart is NOT Exclusive**
+// **CRITICAL: Inbox Only Tracks Completion**
 //
-// TryStart does NOT provide exclusivity or mutual exclusion semantics.
-// Multiple consumer workers MAY pass TryStart() concurrently for the same message.
+// IsProcessed does NOT provide:
+//   - Exclusivity or mutual exclusion
+//   - In-flight tracking or locking
+//   - Retry or state management
 //
-// This behavior is intentional and correct:
+// This is intentional and correct:
 //   - Primary control: SQS visibility timeout prevents concurrent processing
-//   - The inbox table represents **completed messages only**
+//   - The inbox table represents **completed events only**
 //   - In-flight processing is controlled by the message broker (SQS visibility timeout)
 //   - The only definitive point is Complete()
+//
+// **CRITICAL: Uses event_id (Outbox ID), NOT SQS MessageID**
 //
 // Canonical Implementation:
 //
 //	SELECT EXISTS(
 //	    SELECT 1 FROM consumer_inbox
-//	    WHERE consumer_name = ? AND message_id = ?
+//	    WHERE consumer_name = ? AND event_id = ?
 //	)
 //
 // Behavior:
-//   - Record NOT EXISTS: return true (proceed with processing)
-//   - Record EXISTS: return false (already completed, skip processing)
+//   - Record EXISTS: return true (already completed, skip processing)
+//   - Record NOT EXISTS: return false (not yet completed, proceed)
 //
 // No locking, no status checking, no retry logic.
 // SQS visibility timeout handles concurrency.
 // SQS redelivery handles retries.
 //
 // Returns:
-//   - (true, nil): Should proceed with processing
-//   - (false, nil): Already completed, skip processing
-//   - (false, error): Database error occurred
-func (r *InboxRepository) TryStart(ctx context.Context, consumerName, messageID string) (bool, error) {
+//   - (true, nil): Already completed, skip processing
+//   - (false, nil): Not yet completed, proceed with processing
+//   - (_, error): Database error occurred
+func (r *InboxRepository) IsProcessed(ctx context.Context, consumerName string, eventID uuid.UUID) (bool, error) {
 	query := fmt.Sprintf(queryInboxCheckExists, r.tableName)
 
 	var exists bool
 	var err error
 
 	if r.tx != nil {
-		err = r.tx.QueryRow(ctx, query, consumerName, messageID).Scan(&exists)
+		err = r.tx.QueryRow(ctx, query, consumerName, eventID).Scan(&exists)
 	} else {
-		err = r.pool.QueryRow(ctx, query, consumerName, messageID).Scan(&exists)
+		err = r.pool.QueryRow(ctx, query, consumerName, eventID).Scan(&exists)
 	}
 
 	if err != nil {
 		return false, fmt.Errorf("failed to check inbox record: %w", err)
 	}
 
-	// Return true if NOT exists (should proceed)
-	// Return false if exists (already completed, skip)
-	return !exists, nil
+	// Return true if EXISTS (already completed, skip)
+	// Return false if NOT EXISTS (not yet completed, proceed)
+	return exists, nil
 }
 
-// Complete records successful message processing.
+// Complete records successful event processing.
+//
+// **CRITICAL: Uses event_id (Outbox ID), NOT SQS MessageID**
 //
 // Canonical Implementation:
 //
-//	INSERT INTO consumer_inbox (consumer_name, message_id, completed_at)
+//	INSERT INTO consumer_inbox (consumer_name, event_id, completed_at)
 //	VALUES (?, ?, NOW())
-//	ON CONFLICT (consumer_name, message_id) DO NOTHING
+//	ON CONFLICT (consumer_name, event_id) DO NOTHING
 //
 // Behavior:
 //   - First call: INSERT succeeds, record created
 //   - Subsequent calls: INSERT conflicts, no-op (idempotent)
 //
-// This method should be called after successful message processing.
+// This method should be called after successful event processing.
 // Idempotent design ensures safety even if multiple workers call it.
 //
 // Returns:
 //   - nil: Success (record inserted or already exists)
 //   - error: Database error occurred
-func (r *InboxRepository) Complete(ctx context.Context, consumerName, messageID string) error {
+func (r *InboxRepository) Complete(ctx context.Context, consumerName string, eventID uuid.UUID) error {
 	query := fmt.Sprintf(queryInboxComplete, r.tableName)
 
 	var err error
 	if r.tx != nil {
-		_, err = r.tx.Exec(ctx, query, consumerName, messageID)
+		_, err = r.tx.Exec(ctx, query, consumerName, eventID)
 	} else {
-		_, err = r.pool.Exec(ctx, query, consumerName, messageID)
+		_, err = r.pool.Exec(ctx, query, consumerName, eventID)
 	}
 
 	if err != nil {
@@ -170,25 +177,27 @@ func (r *InboxRepository) Complete(ctx context.Context, consumerName, messageID 
 	return nil
 }
 
-// GetByMessageID retrieves an inbox record by consumer name and message ID.
+// GetByEventID retrieves an inbox record by consumer name and event ID.
+//
+// **CRITICAL: Uses event_id (Outbox ID), NOT SQS MessageID**
 //
 // Returns:
-//   - (*ConsumerInbox, nil): Record found (message completed)
-//   - (nil, ErrNotFound): Record doesn't exist (message not yet completed)
+//   - (*ConsumerInbox, nil): Record found (event completed)
+//   - (nil, ErrNotFound): Record doesn't exist (event not yet completed)
 //   - (nil, error): Database error occurred
-func (r *InboxRepository) GetByMessageID(ctx context.Context, consumerName, messageID string) (*core.ConsumerInbox, error) {
-	query := fmt.Sprintf(queryInboxGetByMessageID, r.tableName)
+func (r *InboxRepository) GetByEventID(ctx context.Context, consumerName string, eventID uuid.UUID) (*core.ConsumerInbox, error) {
+	query := fmt.Sprintf(queryInboxGetByEventID, r.tableName)
 
 	var inbox core.ConsumerInbox
 
 	var row pgx.Row
 	if r.tx != nil {
-		row = r.tx.QueryRow(ctx, query, consumerName, messageID)
+		row = r.tx.QueryRow(ctx, query, consumerName, eventID)
 	} else {
-		row = r.pool.QueryRow(ctx, query, consumerName, messageID)
+		row = r.pool.QueryRow(ctx, query, consumerName, eventID)
 	}
 
-	err := row.Scan(&inbox.ConsumerName, &inbox.MessageID, &inbox.CompletedAt)
+	err := row.Scan(&inbox.ConsumerName, &inbox.EventID, &inbox.CompletedAt)
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

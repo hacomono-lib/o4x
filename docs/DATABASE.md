@@ -41,11 +41,9 @@ The consumer_inbox table provides idempotency checking for SQS message handlers.
 ```sql
 CREATE TABLE consumer_inbox (
   consumer_name  TEXT NOT NULL,
-  message_id     TEXT NOT NULL,
-  status         inbox_status NOT NULL DEFAULT 'processing',
-  received_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  processed_at   TIMESTAMPTZ,
-  PRIMARY KEY (consumer_name, message_id)
+  event_id       UUID NOT NULL,
+  completed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (consumer_name, event_id)
 );
 ```
 
@@ -134,15 +132,15 @@ VALUES (...);
 
 ### Consumer Inbox Indexes
 
-#### Primary Key `(consumer_name, message_id)`
+#### Primary Key `(consumer_name, event_id)`
 
-**Purpose**: Prevent duplicate SQS message processing
+**Purpose**: Prevent duplicate event processing
 
 **Query pattern**:
 ```sql
-SELECT consumer_name, message_id, status
+SELECT consumer_name, event_id, completed_at
 FROM consumer_inbox
-WHERE consumer_name = $1 AND message_id = $2;
+WHERE consumer_name = $1 AND event_id = $2;
 ```
 
 **Performance**:

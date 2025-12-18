@@ -123,13 +123,15 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	defer tx.Rollback(ctx)
 
 	// Check idempotency using InboxRepository (within transaction)
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
 	inboxTx := h.inbox.WithTx(tx)
-	shouldProcess, err := inboxTx.TryStart(ctx, "order", msg.MessageID)
+	processed, err := inboxTx.IsProcessed(ctx, "order", msg.EventID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
-	if !shouldProcess {
+	if processed {
 		h.logger.Info("order.confirmed event already processed (idempotent)",
+			"event_id", msg.EventID,
 			"message_id", msg.MessageID,
 			"order_id", event.OrderID,
 		)
@@ -141,16 +143,17 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 
 	// Insert order confirmation record
 	query := `
-		INSERT INTO order_confirmations (message_id, order_id, user_id, product_id, quantity, processed_at)
+		INSERT INTO order_confirmations (event_id, order_id, user_id, product_id, quantity, processed_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
 	`
-	_, err = tx.Exec(ctx, query, msg.MessageID, event.OrderID, event.UserID, event.ProductID, event.Quantity)
+	_, err = tx.Exec(ctx, query, msg.EventID, event.OrderID, event.UserID, event.ProductID, event.Quantity)
 	if err != nil {
 		return fmt.Errorf("failed to insert order confirmation: %w", err)
 	}
 
 	// Mark as completed in inbox
-	if err := inboxTx.Complete(ctx, "order", msg.MessageID); err != nil {
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	if err := inboxTx.Complete(ctx, "order", msg.EventID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
@@ -159,6 +162,7 @@ func (h *OrderConfirmedHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	}
 
 	h.logger.Info("order.confirmed event processed successfully",
+		"event_id", msg.EventID,
 		"message_id", msg.MessageID,
 		"order_id", event.OrderID,
 		"analytics_updated", true,

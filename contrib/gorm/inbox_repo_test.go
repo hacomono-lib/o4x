@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/driver/postgres"
@@ -59,139 +60,139 @@ func (s *InboxRepositorySuite) SetupTest() {
 	s.Require().NoError(result.Error)
 }
 
-func (s *InboxRepositorySuite) TestTryStart_FirstTime_ReturnsTrue() {
+func (s *InboxRepositorySuite) TestIsProcessed_FirstTime_ReturnsFalse() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-123"
+	eventID := uuid.New()
 
-	// Act: TryStart checks existence (returns true if NOT exists)
-	ok, err := s.repo.TryStart(ctx, consumerName, messageID)
+	// Act: IsProcessed checks existence (returns false if NOT yet processed)
+	processed, err := s.repo.IsProcessed(ctx, consumerName, eventID)
 
 	// Assert
 	assert.NoError(s.T(), err)
-	assert.True(s.T(), ok, "First TryStart should return true")
+	assert.False(s.T(), processed, "First IsProcessed should return false")
 
 	// Complete to insert the record
-	err = s.repo.Complete(ctx, consumerName, messageID)
+	err = s.repo.Complete(ctx, consumerName, eventID)
 	assert.NoError(s.T(), err)
 
 	// Verify record was created in database
-	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	inbox, err := s.repo.GetByEventID(ctx, consumerName, eventID)
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), consumerName, inbox.ConsumerName)
-	assert.Equal(s.T(), messageID, inbox.MessageID)
+	assert.Equal(s.T(), eventID, inbox.EventID)
 	assert.NotZero(s.T(), inbox.CompletedAt)
 }
 
-func (s *InboxRepositorySuite) TestTryStart_Duplicate_ReturnsFalse() {
+func (s *InboxRepositorySuite) TestIsProcessed_Duplicate_ReturnsTrue() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-123"
+	eventID := uuid.New()
 
-	// First call - TryStart returns true
-	ok1, err1 := s.repo.TryStart(ctx, consumerName, messageID)
+	// First call - IsProcessed returns false
+	processed1, err1 := s.repo.IsProcessed(ctx, consumerName, eventID)
 	s.Require().NoError(err1)
-	s.Require().True(ok1)
+	s.Require().False(processed1)
 
 	// Complete to insert the record
-	err := s.repo.Complete(ctx, consumerName, messageID)
+	err := s.repo.Complete(ctx, consumerName, eventID)
 	s.Require().NoError(err)
 
-	// Act: Second call with same message_id (duplicate)
-	ok2, err2 := s.repo.TryStart(ctx, consumerName, messageID)
+	// Act: Second call with same eventID (duplicate)
+	processed2, err2 := s.repo.IsProcessed(ctx, consumerName, eventID)
 
-	// Assert: Should return false (already completed)
+	// Assert: Should return true (already completed)
 	assert.NoError(s.T(), err2)
-	assert.False(s.T(), ok2, "Duplicate TryStart should return false")
+	assert.True(s.T(), processed2, "Duplicate IsProcessed should return true")
 }
 
-func (s *InboxRepositorySuite) TestTryStart_DifferentConsumerName_ReturnsTrue() {
+func (s *InboxRepositorySuite) TestIsProcessed_DifferentConsumerName_ReturnsFalse() {
 	// Arrange
 	ctx := context.Background()
-	messageID := "msg-123"
+	eventID := uuid.New()
 
 	// First call with OrderHandler
-	ok1, err1 := s.repo.TryStart(ctx, "OrderHandler", messageID)
+	processed1, err1 := s.repo.IsProcessed(ctx, "OrderHandler", eventID)
 	s.Require().NoError(err1)
-	s.Require().True(ok1)
+	s.Require().False(processed1)
 
 	// Complete for OrderHandler
-	s.repo.Complete(ctx, "OrderHandler", messageID)
+	s.repo.Complete(ctx, "OrderHandler", eventID)
 
 	// Act: Second call with different consumer name
-	ok2, err2 := s.repo.TryStart(ctx, "EmailHandler", messageID)
+	processed2, err2 := s.repo.IsProcessed(ctx, "EmailHandler", eventID)
 
 	// Assert: Different consumer_name means different primary key
 	assert.NoError(s.T(), err2)
-	assert.True(s.T(), ok2, "Different consumer_name should allow TryStart")
+	assert.False(s.T(), processed2, "Different consumer_name should return false for IsProcessed")
 }
 
-func (s *InboxRepositorySuite) TestTryStart_Concurrent_OnlyOneSucceeds() {
+func (s *InboxRepositorySuite) TestIsProcessed_Concurrent_OnlyOneSucceeds() {
 	// This test verifies that Complete's ON CONFLICT prevents race conditions.
-	// Multiple workers can pass TryStart() concurrently, but Complete() ensures only one record is created.
+	// Multiple workers can pass IsProcessed() concurrently, but Complete() ensures only one record is created.
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-concurrent-123"
+	eventID := uuid.New()
 
-	// Act: Simulate concurrent TryStart + Complete calls
+	// Act: Simulate concurrent IsProcessed + Complete calls
 	results := make(chan bool, 10)
-	errors := make(chan error, 20) // 10 for TryStart + 10 for Complete
+	errors := make(chan error, 20) // 10 for IsProcessed + 10 for Complete
 	for i := 0; i < 10; i++ {
 		go func() {
-			ok, err := s.repo.TryStart(ctx, consumerName, messageID)
+			processed, err := s.repo.IsProcessed(ctx, consumerName, eventID)
 			errors <- err
-			results <- ok
-			if ok {
-				// Complete if TryStart returned true
-				completeErr := s.repo.Complete(ctx, consumerName, messageID)
+			results <- !processed // Invert: true if NOT yet processed
+			if !processed {
+				// Complete if IsProcessed returned false
+				completeErr := s.repo.Complete(ctx, consumerName, eventID)
 				errors <- completeErr
 			}
 		}()
 	}
 
 	// Collect results
-	tryStartSuccessCount := 0
+	isProcessedFalseCount := 0
 	for i := 0; i < 10; i++ {
 		err := <-errors
-		assert.NoError(s.T(), err, "TryStart should not return error")
+		assert.NoError(s.T(), err, "IsProcessed should not return error")
 		if <-results {
-			tryStartSuccessCount++
+			isProcessedFalseCount++
 		}
 	}
 
 	// Collect Complete errors
-	for i := 0; i < tryStartSuccessCount; i++ {
+	for i := 0; i < isProcessedFalseCount; i++ {
 		err := <-errors
 		assert.NoError(s.T(), err, "Complete should not return error")
 	}
 
-	// Assert: Multiple TryStart may succeed, but Complete ensures only one record
+	// Assert: Multiple IsProcessed may return false, but Complete ensures only one record
 	// (Due to race conditions, multiple workers might read "not exists" simultaneously)
-	assert.GreaterOrEqual(s.T(), tryStartSuccessCount, 1, "At least one TryStart should succeed")
+	assert.GreaterOrEqual(s.T(), isProcessedFalseCount, 1, "At least one IsProcessed should return false")
 
 	// Verify only one record was created (Complete's ON CONFLICT guarantees this)
 	var count int64
-	s.db.Table(s.tableName).Where("consumer_name = ? AND message_id = ?", consumerName, messageID).Count(&count)
+	s.db.Table(s.tableName).Where("consumer_name = ? AND event_id = ?", consumerName, eventID).Count(&count)
 	assert.Equal(s.T(), int64(1), count, "Only one record should exist in database")
 }
 
 func (s *InboxRepositorySuite) TestComplete_NonExistentRecord_NoError() {
-	// Complete should successfully insert even for non-existent prior TryStart
+	// Complete should successfully insert even for non-existent prior IsProcessed check
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "non-existent-msg"
+	eventID := uuid.New()
 
 	// Act: Complete for non-existent record (should insert)
-	err := s.repo.Complete(ctx, consumerName, messageID)
+	err := s.repo.Complete(ctx, consumerName, eventID)
 
 	// Assert: Should be idempotent (no error)
 	assert.NoError(s.T(), err)
 
 	// Verify record was created
-	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	inbox, err := s.repo.GetByEventID(ctx, consumerName, eventID)
 	assert.NoError(s.T(), err)
 	assert.NotZero(s.T(), inbox.CompletedAt)
 }
@@ -200,12 +201,12 @@ func (s *InboxRepositorySuite) TestComplete_Idempotent_MultipleCallsSucceed() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-123"
+	eventID := uuid.New()
 
 	// Act: Call Complete multiple times (first inserts, subsequent are no-op)
-	err1 := s.repo.Complete(ctx, consumerName, messageID)
-	err2 := s.repo.Complete(ctx, consumerName, messageID)
-	err3 := s.repo.Complete(ctx, consumerName, messageID)
+	err1 := s.repo.Complete(ctx, consumerName, eventID)
+	err2 := s.repo.Complete(ctx, consumerName, eventID)
+	err3 := s.repo.Complete(ctx, consumerName, eventID)
 
 	// Assert: All calls should succeed (ON CONFLICT DO NOTHING)
 	assert.NoError(s.T(), err1)
@@ -214,42 +215,42 @@ func (s *InboxRepositorySuite) TestComplete_Idempotent_MultipleCallsSucceed() {
 
 	// Verify only one record exists
 	var count int64
-	s.db.Table(s.tableName).Where("consumer_name = ? AND message_id = ?", consumerName, messageID).Count(&count)
+	s.db.Table(s.tableName).Where("consumer_name = ? AND event_id = ?", consumerName, eventID).Count(&count)
 	assert.Equal(s.T(), int64(1), count)
 }
 
-func (s *InboxRepositorySuite) TestGetByMessageID_Found() {
+func (s *InboxRepositorySuite) TestGetByEventID_Found() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-123"
+	eventID := uuid.New()
 
-	ok, err := s.repo.TryStart(ctx, consumerName, messageID)
+	processed, err := s.repo.IsProcessed(ctx, consumerName, eventID)
 	s.Require().NoError(err)
-	s.Require().True(ok)
+	s.Require().False(processed)
 
 	// Complete to insert the record
-	s.repo.Complete(ctx, consumerName, messageID)
+	s.repo.Complete(ctx, consumerName, eventID)
 
 	// Act
-	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	inbox, err := s.repo.GetByEventID(ctx, consumerName, eventID)
 
 	// Assert
 	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), inbox)
 	assert.Equal(s.T(), consumerName, inbox.ConsumerName)
-	assert.Equal(s.T(), messageID, inbox.MessageID)
+	assert.Equal(s.T(), eventID, inbox.EventID)
 	assert.NotZero(s.T(), inbox.CompletedAt)
 }
 
-func (s *InboxRepositorySuite) TestGetByMessageID_NotFound() {
+func (s *InboxRepositorySuite) TestGetByEventID_NotFound() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "non-existent-msg"
+	eventID := uuid.New()
 
 	// Act
-	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	inbox, err := s.repo.GetByEventID(ctx, consumerName, eventID)
 
 	// Assert
 	assert.ErrorIs(s.T(), err, core.ErrNotFound)
@@ -263,15 +264,15 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan() {
 
 	// Insert 3 messages
 	for i := 1; i <= 3; i++ {
-		messageID := "msg-old-" + string(rune('0'+i))
-		ok, err := s.repo.TryStart(ctx, consumerName, messageID)
+		eventID := uuid.New()
+		processed, err := s.repo.IsProcessed(ctx, consumerName, eventID)
 		s.Require().NoError(err)
-		s.Require().True(ok)
-		s.repo.Complete(ctx, consumerName, messageID)
+		s.Require().False(processed)
+		s.repo.Complete(ctx, consumerName, eventID)
 	}
 
 	// Manually update completed_at to simulate old messages
-	result := s.db.Exec("UPDATE " + s.tableName + " SET completed_at = NOW() - INTERVAL '10 days' WHERE message_id LIKE 'msg-old-%'")
+	result := s.db.Exec("UPDATE " + s.tableName + " SET completed_at = NOW() - INTERVAL '10 days' WHERE consumer_name = ?", consumerName)
 	s.Require().NoError(result.Error)
 
 	// Act: Delete messages older than 7 days
@@ -288,19 +289,21 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan_KeepsRecentMessages() {
 	consumerName := "OrderHandler"
 
 	// Insert old message
-	ok1, err1 := s.repo.TryStart(ctx, consumerName, "msg-old")
+	oldEventID := uuid.New()
+	processed1, err1 := s.repo.IsProcessed(ctx, consumerName, oldEventID)
 	s.Require().NoError(err1)
-	s.Require().True(ok1)
-	s.repo.Complete(ctx, consumerName, "msg-old")
+	s.Require().False(processed1)
+	s.repo.Complete(ctx, consumerName, oldEventID)
 
 	// Insert recent message
-	ok2, err2 := s.repo.TryStart(ctx, consumerName, "msg-recent")
+	recentEventID := uuid.New()
+	processed2, err2 := s.repo.IsProcessed(ctx, consumerName, recentEventID)
 	s.Require().NoError(err2)
-	s.Require().True(ok2)
-	s.repo.Complete(ctx, consumerName, "msg-recent")
+	s.Require().False(processed2)
+	s.repo.Complete(ctx, consumerName, recentEventID)
 
 	// Make one message old
-	result := s.db.Exec("UPDATE " + s.tableName + " SET completed_at = NOW() - INTERVAL '10 days' WHERE message_id = 'msg-old'")
+	result := s.db.Exec("UPDATE "+s.tableName+" SET completed_at = NOW() - INTERVAL '10 days' WHERE event_id = ?", oldEventID)
 	s.Require().NoError(result.Error)
 
 	// Act: Delete messages older than 7 days
@@ -312,7 +315,7 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan_KeepsRecentMessages() {
 
 	// Verify recent message still exists
 	var count int64
-	s.db.Table(s.tableName).Where("message_id = ?", "msg-recent").Count(&count)
+	s.db.Table(s.tableName).Where("event_id = ?", recentEventID).Count(&count)
 	assert.Equal(s.T(), int64(1), count, "Recent message should remain")
 }
 
@@ -320,23 +323,23 @@ func (s *InboxRepositorySuite) TestWithTx_RollbackPreventsInsertion() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-tx-rollback"
+	eventID := uuid.New()
 
 	// Act: Start transaction and rollback
 	tx := s.db.Begin()
 	txRepo := s.repo.WithTx(tx)
 
-	ok, err := txRepo.TryStart(ctx, consumerName, messageID)
+	processed, err := txRepo.IsProcessed(ctx, consumerName, eventID)
 	s.Require().NoError(err)
-	s.Require().True(ok)
+	s.Require().False(processed)
 
 	// Complete within transaction
-	txRepo.Complete(ctx, consumerName, messageID)
+	txRepo.Complete(ctx, consumerName, eventID)
 
 	tx.Rollback()
 
 	// Assert: Record should not exist after rollback
-	_, err = s.repo.GetByMessageID(ctx, consumerName, messageID)
+	_, err = s.repo.GetByEventID(ctx, consumerName, eventID)
 	assert.ErrorIs(s.T(), err, core.ErrNotFound, "Rollback should prevent record insertion")
 }
 
@@ -344,25 +347,25 @@ func (s *InboxRepositorySuite) TestWithTx_CommitPersistsInsertion() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-tx-commit"
+	eventID := uuid.New()
 
 	// Act: Start transaction and commit
 	tx := s.db.Begin()
 	txRepo := s.repo.WithTx(tx)
 
-	ok, err := txRepo.TryStart(ctx, consumerName, messageID)
+	processed, err := txRepo.IsProcessed(ctx, consumerName, eventID)
 	s.Require().NoError(err)
-	s.Require().True(ok)
+	s.Require().False(processed)
 
 	// Complete within transaction
-	txRepo.Complete(ctx, consumerName, messageID)
+	txRepo.Complete(ctx, consumerName, eventID)
 
 	tx.Commit()
 
 	// Assert: Record should exist after commit
-	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	inbox, err := s.repo.GetByEventID(ctx, consumerName, eventID)
 	assert.NoError(s.T(), err)
-	assert.Equal(s.T(), messageID, inbox.MessageID)
+	assert.Equal(s.T(), eventID, inbox.EventID)
 }
 
 func (s *InboxRepositorySuite) TestWithTx_BusinessTransactionWithInbox() {
@@ -372,7 +375,7 @@ func (s *InboxRepositorySuite) TestWithTx_BusinessTransactionWithInbox() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-business-tx"
+	eventID := uuid.New()
 
 	// Simulate business table
 	s.db.Exec("CREATE TEMP TABLE IF NOT EXISTS test_orders (id TEXT PRIMARY KEY, amount INT)")
@@ -383,11 +386,11 @@ func (s *InboxRepositorySuite) TestWithTx_BusinessTransactionWithInbox() {
 
 	// 1. Check idempotency
 	txRepo := s.repo.WithTx(tx)
-	ok, err := txRepo.TryStart(ctx, consumerName, messageID)
+	processed, err := txRepo.IsProcessed(ctx, consumerName, eventID)
 	s.Require().NoError(err)
-	if !ok {
+	if processed {
 		tx.Rollback()
-		s.T().Fatal("Expected first TryStart to succeed")
+		s.T().Fatal("Expected first IsProcessed to return false")
 	}
 
 	// 2. Execute business logic
@@ -395,7 +398,7 @@ func (s *InboxRepositorySuite) TestWithTx_BusinessTransactionWithInbox() {
 	s.Require().NoError(result.Error)
 
 	// 3. Mark as completed within transaction
-	err = txRepo.Complete(ctx, consumerName, messageID)
+	err = txRepo.Complete(ctx, consumerName, eventID)
 	s.Require().NoError(err)
 
 	tx.Commit()
@@ -405,7 +408,7 @@ func (s *InboxRepositorySuite) TestWithTx_BusinessTransactionWithInbox() {
 	s.db.Raw("SELECT COUNT(*) FROM test_orders WHERE id = ?", "order-123").Scan(&count)
 	assert.Equal(s.T(), int64(1), count, "Business record should exist")
 
-	inbox, err := s.repo.GetByMessageID(ctx, consumerName, messageID)
+	inbox, err := s.repo.GetByEventID(ctx, consumerName, eventID)
 	assert.NoError(s.T(), err)
 	assert.NotZero(s.T(), inbox.CompletedAt)
 }
@@ -416,7 +419,7 @@ func (s *InboxRepositorySuite) TestWithTx_DuplicatePreventsBusinessLogic() {
 	// Arrange
 	ctx := context.Background()
 	consumerName := "OrderHandler"
-	messageID := "msg-duplicate-prevention"
+	eventID := uuid.New()
 
 	// Simulate business table
 	s.db.Exec("CREATE TEMP TABLE IF NOT EXISTS test_orders (id TEXT PRIMARY KEY, amount INT)")
@@ -425,20 +428,20 @@ func (s *InboxRepositorySuite) TestWithTx_DuplicatePreventsBusinessLogic() {
 	// First message processing
 	tx1 := s.db.Begin()
 	txRepo1 := s.repo.WithTx(tx1)
-	ok1, _ := txRepo1.TryStart(ctx, consumerName, messageID)
-	s.Require().True(ok1)
+	processed1, _ := txRepo1.IsProcessed(ctx, consumerName, eventID)
+	s.Require().False(processed1)
 	tx1.Exec("INSERT INTO test_orders (id, amount) VALUES (?, ?)", "order-456", 2000)
-	txRepo1.Complete(ctx, consumerName, messageID) // Mark as completed
+	txRepo1.Complete(ctx, consumerName, eventID) // Mark as completed
 	tx1.Commit()
 
 	// Act: Duplicate message processing
 	tx2 := s.db.Begin()
 	txRepo2 := s.repo.WithTx(tx2)
-	ok2, err2 := txRepo2.TryStart(ctx, consumerName, messageID)
+	processed2, err2 := txRepo2.IsProcessed(ctx, consumerName, eventID)
 
 	// Assert: Should detect duplicate
 	assert.NoError(s.T(), err2)
-	assert.False(s.T(), ok2, "Duplicate should be detected")
+	assert.True(s.T(), processed2, "Duplicate should be detected")
 
 	tx2.Rollback()
 

@@ -105,7 +105,7 @@ services:
       ORDER_CONFIRMED_SLEEP_MAX: 40ms
       GOMAXPROCS: "1"
     # FIFO queue requires MessageConcurrency=1 for ordering guarantees
-    command: ["./consumer", "--workers", "1", "--message-concurrency", "1"]
+    command: ["./bin/consumer", "--workers", "1", "--message-concurrency", "1"]
     # Resource limits (0.5 vCPU / 1GB memory)
     cpu_quota: 50000
     cpu_period: 100000
@@ -185,7 +185,7 @@ services:
       AWS_REGION: us-east-1
       HEALTH_PORT: 8080
       GOMAXPROCS: "1"
-    command: ["./dispatcher-bench", "--workers", "${WORKERS:-2}"]
+    command: ["./bin/dispatcher-bench", "--workers", "${WORKERS:-2}"]
     # Resource limits (0.5 vCPU / 1GB memory)
     cpu_quota: 50000
     cpu_period: 100000

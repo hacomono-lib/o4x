@@ -346,6 +346,78 @@ router := consumer.NewEventTypeRouter()
 router.Register("order.created", orderHandler)
 ```
 
+### Using Metadata (Distributed Tracing, Custom Headers)
+
+The `Metadata` field is passed through from Outbox to Consumer, enabling distributed tracing and custom context propagation:
+
+```go
+// Producer: Insert message with metadata
+metadata := map[string]string{
+    "trace_id":  "abc123",
+    "span_id":   "xyz789",
+    "tenant_id": "tenant-1",
+    "user_id":   "user-456",
+}
+metadataJSON, _ := json.Marshal(metadata)
+
+repo.Insert(ctx, core.OutboxInsertParams{
+    EventType:      "order.created",
+    Payload:        payloadJSON,
+    Metadata:       metadataJSON,  // Travels to Consumer
+    IdempotencyKey: "order-123",
+})
+
+// Consumer: Access metadata in handler
+handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessage) error {
+    var metadata struct {
+        TraceID  string `json:"trace_id"`
+        SpanID   string `json:"span_id"`
+        TenantID string `json:"tenant_id"`
+        UserID   string `json:"user_id"`
+    }
+
+    if len(msg.Metadata) > 0 {
+        json.Unmarshal(msg.Metadata, &metadata)
+
+        // Use for distributed tracing
+        span := tracer.StartSpan("process.order",
+            tracer.TraceID(metadata.TraceID),
+            tracer.SpanID(metadata.SpanID))
+        defer span.Finish()
+
+        // Log with context
+        logger.Info("processing order",
+            "trace_id", metadata.TraceID,
+            "tenant_id", metadata.TenantID,
+            "event_type", msg.EventType)
+    }
+
+    // Process message...
+    return nil
+})
+```
+
+Metadata can also be accessed in Hooks for observability:
+
+```go
+hooks := &consumer.Hooks{
+    OnConsumeStart: func(ctx context.Context, msg *consumer.SQSMessage) {
+        var metadata struct {
+            TenantID string `json:"tenant_id"`
+        }
+        json.Unmarshal(msg.Metadata, &metadata)
+
+        // Send metrics with tenant_id tag
+        metrics.Increment("messages.started",
+            "event_type", msg.EventType,
+            "tenant_id", metadata.TenantID)
+    },
+}
+
+config := consumer.DefaultServiceConfig(queueURL)
+config.Hooks = hooks
+```
+
 ## Idempotency
 
 ### CRITICAL: External APIs Without Idempotency Support
@@ -370,12 +442,18 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
     var event PaymentEvent
     json.Unmarshal(msg.Body, &event)
 
-    // REQUIRED: Pass message_id as idempotency key
+    // REQUIRED: Pass idempotency key to external API
+    // CRITICAL: Use msg.IdempotencyKey OR msg.EventID, NEVER msg.MessageID (changes on redelivery)
     params := &stripe.ChargeParams{
         Amount:   stripe.Int64(event.Amount),
         Currency: stripe.String("usd"),
     }
-    params.SetIdempotencyKey(msg.MessageID) // CRITICAL
+
+    // Option 1: Use IdempotencyKey (if you generated UUID v4 at Outbox insertion)
+    params.SetIdempotencyKey(msg.IdempotencyKey)
+
+    // Option 2: Use EventID (UUID v7, if API accepts any UUID format)
+    // params.SetIdempotencyKey(msg.EventID.String())
 
     charge, err := client.Charges.New(params)
     if err != nil {
@@ -406,29 +484,29 @@ The `consumer_name` parameter is a **logical consumer identity** at the service 
 
 ```go
 // CORRECT: All instances use same consumer_name
-ok, _ := inboxRepo.TryStart(ctx, "order-service", msg.MessageID)
+processed, _ := inboxRepo.IsProcessed(ctx, "order-service", msg.EventID)
 
 // WRONG: Different consumer_name per handler
-ok, _ := inboxRepo.TryStart(ctx, "OrderCreatedHandler", msg.MessageID) // ❌
+processed, _ := inboxRepo.IsProcessed(ctx, "OrderCreatedHandler", msg.EventID) // ❌
 ```
 
-#### CRITICAL: TryStart is NOT Exclusive
+#### CRITICAL: IsProcessed is NOT Exclusive
 
-**`TryStart()` does NOT provide exclusivity or mutual exclusion semantics.**
+**`IsProcessed()` does NOT provide exclusivity or mutual exclusion semantics.**
 
-Multiple consumer workers MAY pass `TryStart()` concurrently for the same message.
+Multiple consumer workers MAY pass `IsProcessed()` concurrently for the same event.
 
 This behavior is intentional and correct. Handlers MUST be safe to run multiple times.
 
 **Why This Design:**
 - Primary control: SQS visibility timeout prevents concurrent processing
-- The inbox table represents **completed messages only**
+- The inbox table represents **completed events only**
 - In-flight processing is controlled by the message broker (SQS visibility timeout)
 - The only definitive point is `Complete()`
 
 ```text
-TryStart   : optimistic check (may pass concurrently)
-Complete   : final commit (single source of truth)
+IsProcessed : optimistic check (may pass concurrently)
+Complete    : final commit (single source of truth)
 ```
 
 #### Pattern: Transaction Support
@@ -443,27 +521,29 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
     defer tx.Rollback(ctx)
 
     // Check idempotency (optimistic check, NOT a lock)
+    // CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID (changes on redelivery)
     inboxTx := inboxRepo.WithTx(tx)
-    ok, _ := inboxTx.TryStart(ctx, "order-service", msg.MessageID)
-    if !ok {
-        return nil // Already processed
+    processed, _ := inboxTx.IsProcessed(ctx, "order-service", msg.EventID)
+    if processed {
+        return nil // Already completed, skip
     }
 
     // Process message (same transaction)
     tx.Exec(ctx, "INSERT INTO orders ...")
 
     // Mark completed (single source of truth)
-    inboxTx.Complete(ctx, "order-service", msg.MessageID)
+    inboxTx.Complete(ctx, "order-service", msg.EventID)
 
     return tx.Commit(ctx)
 })
 ```
 
 **Key Concepts:**
-- Inbox records completed messages only
-- `TryStart` is an optimistic check
-- `Complete` is the single source of truth
-- Race-safe duplicate detection via `(consumer_name, message_id)` primary key
+- Inbox records completed events only
+- `IsProcessed()` is an optimistic check (returns `true` if already completed)
+- `Complete()` is the single source of truth
+- Race-safe duplicate detection via `(consumer_name, event_id)` primary key
+- **event_id** is Outbox ID (stable logical identity), NOT SQS MessageID (changes on redelivery)
 
 → **For complete idempotency patterns, decision tree, and best practices**, see [docs/idempotency.md](docs/idempotency.md)
 

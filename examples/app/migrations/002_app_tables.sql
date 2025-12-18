@@ -62,7 +62,7 @@ CREATE INDEX idx_notifications_recipient ON notifications(recipient);
 
 -- Order confirmations table (for idempotency demonstration)
 CREATE TABLE IF NOT EXISTS order_confirmations (
-    message_id VARCHAR(255) PRIMARY KEY,
+    event_id UUID PRIMARY KEY,
     order_id UUID NOT NULL,
     user_id UUID NOT NULL,
     product_id VARCHAR(255) NOT NULL,
@@ -75,7 +75,7 @@ CREATE INDEX idx_order_confirmations_processed_at ON order_confirmations(process
 
 -- User welcome credits table (for idempotency demonstration)
 CREATE TABLE IF NOT EXISTS user_welcome_credits (
-    message_id VARCHAR(255) PRIMARY KEY,
+    event_id UUID PRIMARY KEY,
     user_id UUID NOT NULL,
     credit_amount INTEGER NOT NULL,
     granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

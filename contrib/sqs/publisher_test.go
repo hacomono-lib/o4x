@@ -719,3 +719,71 @@ func (s *MultiBatchPublisherSuite) TestPublish_OversizedPayload_ReturnsPermanent
 	assert.True(s.T(), !core.IsRetryable(err), "oversized error should not be retryable")
 	assert.ErrorIs(s.T(), err, core.ErrPayloadTooLarge)
 }
+// BuildMessageAttributesSuite tests buildMessageAttributes function
+type BuildMessageAttributesSuite struct {
+	suite.Suite
+}
+
+func TestBuildMessageAttributesSuite(t *testing.T) {
+	suite.Run(t, new(BuildMessageAttributesSuite))
+}
+
+func (s *BuildMessageAttributesSuite) TestBuildMessageAttributes_WithoutMetadata() {
+	// Arrange
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "test.event",
+		IdempotencyKey: "test-key",
+		Metadata:       nil,
+	}
+
+	// Act
+	attrs := buildMessageAttributes(msg)
+
+	// Assert
+	assert.Len(s.T(), attrs, 3, "should have 3 attributes without metadata")
+	assert.Equal(s.T(), "test.event", *attrs["event_type"].StringValue)
+	assert.Equal(s.T(), "test-id", *attrs["outbox_id"].StringValue)
+	assert.Equal(s.T(), "test-key", *attrs["idempotency_key"].StringValue)
+	_, hasMetadata := attrs["metadata"]
+	assert.False(s.T(), hasMetadata, "should not have metadata attribute")
+}
+
+func (s *BuildMessageAttributesSuite) TestBuildMessageAttributes_WithMetadata() {
+	// Arrange
+	metadata := []byte(`{"trace_id":"abc123","span_id":"xyz789","tenant_id":"tenant-1"}`)
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "test.event",
+		IdempotencyKey: "test-key",
+		Metadata:       metadata,
+	}
+
+	// Act
+	attrs := buildMessageAttributes(msg)
+
+	// Assert
+	assert.Len(s.T(), attrs, 4, "should have 4 attributes with metadata")
+	assert.Equal(s.T(), "test.event", *attrs["event_type"].StringValue)
+	assert.Equal(s.T(), "test-id", *attrs["outbox_id"].StringValue)
+	assert.Equal(s.T(), "test-key", *attrs["idempotency_key"].StringValue)
+	assert.Equal(s.T(), string(metadata), *attrs["metadata"].StringValue)
+}
+
+func (s *BuildMessageAttributesSuite) TestBuildMessageAttributes_WithEmptyMetadata() {
+	// Arrange
+	msg := &core.Outbox{
+		ID:             "test-id",
+		EventType:      "test.event",
+		IdempotencyKey: "test-key",
+		Metadata:       []byte{},
+	}
+
+	// Act
+	attrs := buildMessageAttributes(msg)
+
+	// Assert
+	assert.Len(s.T(), attrs, 3, "should have 3 attributes with empty metadata")
+	_, hasMetadata := attrs["metadata"]
+	assert.False(s.T(), hasMetadata, "should not have metadata attribute for empty metadata")
+}

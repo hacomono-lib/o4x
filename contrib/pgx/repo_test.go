@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -760,9 +761,9 @@ func (s *ConfigOptionsSuite) TestWithInboxTableName_SetsCustomInboxTable() {
 	_, err := s.pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS `+customInboxTableName+` (
 			consumer_name TEXT NOT NULL,
-			message_id TEXT NOT NULL,
+			event_id UUID NOT NULL,
 			completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			PRIMARY KEY (consumer_name, message_id)
+			PRIMARY KEY (consumer_name, event_id)
 		)
 	`)
 	s.Require().NoError(err)
@@ -771,13 +772,14 @@ func (s *ConfigOptionsSuite) TestWithInboxTableName_SetsCustomInboxTable() {
 	// Create InboxRepository with custom table name
 	inboxRepo := NewInboxRepository(s.pool, WithInboxTableName(customInboxTableName))
 
-	// Act - TryStart checks if message exists (should not exist initially)
-	ok, err := inboxRepo.TryStart(ctx, "test-consumer", "msg-123")
+	// Act - IsProcessed checks if event exists (should not exist initially)
+	eventID := uuid.New()
+	processed, err := inboxRepo.IsProcessed(ctx, "test-consumer", eventID)
 	assert.NoError(s.T(), err)
-	assert.True(s.T(), ok, "first call should return true (not exists)")
+	assert.False(s.T(), processed, "first call should return false (not yet completed)")
 
-	// Complete the message to insert a record
-	err = inboxRepo.Complete(ctx, "test-consumer", "msg-123")
+	// Complete the event to insert a record
+	err = inboxRepo.Complete(ctx, "test-consumer", eventID)
 	assert.NoError(s.T(), err)
 
 	// Verify it's in the custom table

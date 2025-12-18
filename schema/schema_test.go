@@ -92,9 +92,9 @@ func (s *SchemaSuite) TestConsumerInboxDDL_GeneratesCorrectSchema() {
 	// Check table creation
 	assert.Contains(s.T(), ddl, "CREATE TABLE consumer_inbox")
 	assert.Contains(s.T(), ddl, "consumer_name    TEXT NOT NULL")
-	assert.Contains(s.T(), ddl, "message_id       TEXT NOT NULL")
+	assert.Contains(s.T(), ddl, "event_id         UUID NOT NULL")
 	assert.Contains(s.T(), ddl, "completed_at     TIMESTAMPTZ NOT NULL DEFAULT now()")
-	assert.Contains(s.T(), ddl, "PRIMARY KEY (consumer_name, message_id)")
+	assert.Contains(s.T(), ddl, "PRIMARY KEY (consumer_name, event_id)")
 
 	// Check index for cleanup
 	assert.Contains(s.T(), ddl, "CREATE INDEX idx_consumer_inbox_completed_at")
@@ -102,7 +102,7 @@ func (s *SchemaSuite) TestConsumerInboxDDL_GeneratesCorrectSchema() {
 
 	// Check comments
 	assert.Contains(s.T(), ddl, "Consumer Inbox Schema")
-	assert.Contains(s.T(), ddl, "Track COMPLETED messages only")
+	assert.Contains(s.T(), ddl, "Track COMPLETED events only")
 }
 
 func (s *SchemaSuite) TestConsumerInboxDDL_WithCustomTableName() {

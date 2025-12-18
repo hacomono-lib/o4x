@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/google/uuid"
 
 	"github.com/hacomono-lib/o4x/core"
 )
@@ -449,14 +450,29 @@ func (s *Service) parseSQSMessage(sqsMsg sqstypes.Message) *SQSMessage {
 		msg.EventType = aws.ToString(eventTypeAttr.StringValue)
 	}
 
+	// CRITICAL: Parse EventID from outbox_id (logical event identity, NOT SQS MessageID)
 	if outboxIDAttr, ok := sqsMsg.MessageAttributes["outbox_id"]; ok {
 		if idStr := aws.ToString(outboxIDAttr.StringValue); idStr != "" {
-			msg.OutboxID = &idStr
+			if eventID, err := uuid.Parse(idStr); err == nil {
+				msg.EventID = eventID
+			} else {
+				s.config.Logger.Warn("failed to parse outbox_id as UUID",
+					"outbox_id", idStr,
+					"error", err,
+					"message_id", msg.MessageID)
+			}
 		}
 	}
 
 	if idempotencyAttr, ok := sqsMsg.MessageAttributes["idempotency_key"]; ok {
 		msg.IdempotencyKey = aws.ToString(idempotencyAttr.StringValue)
+	}
+
+	// Parse metadata if present (trace context, custom headers, etc.)
+	if metadataAttr, ok := sqsMsg.MessageAttributes["metadata"]; ok {
+		if metadataStr := aws.ToString(metadataAttr.StringValue); metadataStr != "" {
+			msg.Metadata = json.RawMessage(metadataStr)
+		}
 	}
 
 	return msg

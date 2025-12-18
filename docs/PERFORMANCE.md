@@ -429,14 +429,16 @@ When scaling consumers horizontally, all instances must share the same `consumer
 
 ```go
 // CORRECT: All instances use the same consumer_name
+// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID (changes on redelivery)
 inboxRepo := pgx.NewInboxRepository(pool)
-ok, err := inboxRepo.TryStart(ctx, "notification-service", msg.MessageID)
+processed, err := inboxRepo.IsProcessed(ctx, "notification-service", msg.EventID)
 ```
 
 **How it works:**
-- `consumer_inbox` table uses composite primary key: `(consumer_name, message_id)`
-- Same `message_id` can only be processed once per `consumer_name`
+- `consumer_inbox` table uses composite primary key: `(consumer_name, event_id)`
+- Same `event_id` can only be processed once per `consumer_name`
 - Different instances of the same service share the `consumer_name`
+- `event_id` is the Outbox event ID (stable logical identity), NOT SQS MessageID (changes on redelivery)
 
 ### Scaling Considerations
 

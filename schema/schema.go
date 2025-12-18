@@ -84,47 +84,56 @@ DROP TYPE IF EXISTS %s;
 // ConsumerInboxDDL generates the DDL for the consumer_inbox table (Transactional Inbox pattern).
 //
 // Purpose:
-//   - Idempotency Store: Ensures exactly-once message processing
+//   - Idempotency Store: Ensures exactly-once event processing
 //   - Atomic duplicate detection via composite primary key
-//   - CRITICAL: Inbox is NOT a message broker - it only tracks "has this been COMPLETED?"
+//   - CRITICAL: Inbox is NOT a message broker - it only tracks "has this EVENT been COMPLETED?"
 //
 // Design Philosophy:
-//   - Primary Key: (consumer_name, message_id) - Natural idempotency via INSERT conflict
+//   - Primary Key: (consumer_name, event_id) - Natural idempotency via INSERT conflict
 //   - NO status field: Only tracks completion via completed_at timestamp
 //   - NO locking: SQS visibility timeout handles concurrency control
 //   - NO retry logic: Broker handles redelivery
 //   - NO stuck detection: Use observability (logs/metrics) instead
 //
+// CRITICAL: Idempotency Key is event_id (Outbox ID), NOT SQS MessageID
+//
+// Why event_id, not SQS MessageID:
+//   - SQS MessageID changes on EVERY redelivery (Outbox republish, visibility timeout, DLQ requeue)
+//   - event_id is the LOGICAL event identity from Outbox
+//   - Same event = same event_id, regardless of how many times it's sent to SQS
+//   - This ensures true exactly-once processing at the event level
+//
 // Semantic Model:
-//   - Record exists: Message has been COMPLETED (skip forever)
-//   - Record missing: Message not yet completed (proceed with processing)
+//   - Record exists: Event has been COMPLETED (skip forever)
+//   - Record missing: Event not yet completed (proceed with processing)
 //
 // Usage:
 //
 //	// In consumer handler
-//	ok, err := inboxRepo.TryStart(ctx, "OrderHandler", msg.MessageID)
-//	if !ok {
+//	processed, err := inboxRepo.IsProcessed(ctx, "OrderHandler", msg.EventID)
+//	if processed {
 //	    return nil // Already completed, skip
 //	}
-//	// Process message (idempotent logic)...
-//	inboxRepo.Complete(ctx, "OrderHandler", msg.MessageID)
+//	// Process event (idempotent logic)...
+//	inboxRepo.Complete(ctx, "OrderHandler", msg.EventID)
 func ConsumerInboxDDL(tableName string) string {
 	return fmt.Sprintf(`-- Consumer Inbox Schema (Transactional Inbox / Idempotency Store)
--- Purpose: Track COMPLETED messages only for exactly-once semantics
--- Design: Composite PK (consumer_name, message_id) for atomic duplicate detection
--- Philosophy: Inbox is NOT a broker - it only answers "has this been completed?"
+-- Purpose: Track COMPLETED events only for exactly-once semantics
+-- Design: Composite PK (consumer_name, event_id) for atomic duplicate detection
+-- Philosophy: Inbox is NOT a broker - it only answers "has this EVENT been completed?"
+-- CRITICAL: event_id is Outbox ID (logical event identity), NOT SQS MessageID
 
 CREATE TABLE %s (
   consumer_name    TEXT NOT NULL,
-  message_id       TEXT NOT NULL,
+  event_id         UUID NOT NULL,
   completed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (consumer_name, message_id)
+  PRIMARY KEY (consumer_name, event_id)
 );
 
 -- Column comments for consumer_inbox table
 COMMENT ON COLUMN %s.consumer_name IS 'Logical consumer service identity (e.g., order-service, notification-service)';
-COMMENT ON COLUMN %s.message_id IS 'Unique message identifier from the message broker (e.g., SQS MessageID)';
-COMMENT ON COLUMN %s.completed_at IS 'Timestamp when message processing was completed successfully';
+COMMENT ON COLUMN %s.event_id IS 'Outbox event ID (logical event identity). CRITICAL: NOT SQS MessageID. Same event = same event_id across all redeliveries.';
+COMMENT ON COLUMN %s.completed_at IS 'Timestamp when event processing was completed successfully';
 
 -- Index for cleanup queries (DELETE WHERE completed_at < ...)
 CREATE INDEX idx_%s_completed_at

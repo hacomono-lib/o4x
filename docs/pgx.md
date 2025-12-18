@@ -194,19 +194,20 @@ func (h *OrderHandler) Handle(ctx context.Context, msg *consumer.SQSMessage) err
     defer tx.Rollback(ctx)
 
     // Check idempotency
+    // CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID (changes on redelivery)
     inboxTx := h.inbox.WithTx(tx)
-    shouldProcess, err := inboxTx.TryStart(ctx, "OrderHandler", msg.MessageID)
+    processed, err := inboxTx.IsProcessed(ctx, "OrderHandler", msg.EventID)
     if err != nil {
         return err
     }
-    if !shouldProcess {
-        return nil // Already processed
+    if processed {
+        return nil // Already completed, skip
     }
 
     // Process message...
 
     // Mark as completed
-    if err := inboxTx.Complete(ctx, "OrderHandler", msg.MessageID); err != nil {
+    if err := inboxTx.Complete(ctx, "OrderHandler", msg.EventID); err != nil {
         return err
     }
 

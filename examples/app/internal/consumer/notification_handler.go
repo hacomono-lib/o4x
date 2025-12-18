@@ -72,12 +72,14 @@ func (h *NotificationEmailHandler) Handle(ctx context.Context, msg *consumer.SQS
 	// No transaction needed for external API calls
 
 	// Check idempotency using InboxRepository (auto-commit)
-	shouldProcess, err := h.inbox.TryStart(ctx, "notification", msg.MessageID)
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	processed, err := h.inbox.IsProcessed(ctx, "notification", msg.EventID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
-	if !shouldProcess {
+	if processed {
 		h.logger.Info("notification.email event already processed (idempotent)",
+			"event_id", msg.EventID,
 			"message_id", msg.MessageID,
 			"notification_id", event.NotificationID,
 		)
@@ -90,6 +92,7 @@ func (h *NotificationEmailHandler) Handle(ctx context.Context, msg *consumer.SQS
 	// Simulate random failures for testing retry mechanism
 	if h.simulateFailure && rand.Float64() < h.failureRate {
 		h.logger.Warn("simulated email sending failure (will retry)",
+			"event_id", msg.EventID,
 			"message_id", msg.MessageID,
 			"notification_id", event.NotificationID,
 		)
@@ -102,7 +105,8 @@ func (h *NotificationEmailHandler) Handle(ctx context.Context, msg *consumer.SQS
 	}
 
 	// Mark as completed in inbox (auto-commit)
-	if err := h.inbox.Complete(ctx, "notification", msg.MessageID); err != nil {
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	if err := h.inbox.Complete(ctx, "notification", msg.EventID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
@@ -148,12 +152,14 @@ func (h *NotificationSMSHandler) Handle(ctx context.Context, msg *consumer.SQSMe
 	// No transaction needed for external API calls
 
 	// Check idempotency using InboxRepository (auto-commit)
-	shouldProcess, err := h.inbox.TryStart(ctx, "notification", msg.MessageID)
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	processed, err := h.inbox.IsProcessed(ctx, "notification", msg.EventID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
-	if !shouldProcess {
+	if processed {
 		h.logger.Info("notification.sms event already processed (idempotent)",
+			"event_id", msg.EventID,
 			"message_id", msg.MessageID,
 			"notification_id", event.NotificationID,
 		)
@@ -170,11 +176,13 @@ func (h *NotificationSMSHandler) Handle(ctx context.Context, msg *consumer.SQSMe
 	)
 
 	// Mark as completed in inbox (auto-commit)
-	if err := h.inbox.Complete(ctx, "notification", msg.MessageID); err != nil {
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	if err := h.inbox.Complete(ctx, "notification", msg.EventID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
 	h.logger.Info("notification.sms event processed successfully",
+		"event_id", msg.EventID,
 		"message_id", msg.MessageID,
 		"notification_id", event.NotificationID,
 	)
@@ -215,12 +223,14 @@ func (h *NotificationPushHandler) Handle(ctx context.Context, msg *consumer.SQSM
 	// No transaction needed for external API calls
 
 	// Check idempotency using InboxRepository (auto-commit)
-	shouldProcess, err := h.inbox.TryStart(ctx, "notification", msg.MessageID)
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	processed, err := h.inbox.IsProcessed(ctx, "notification", msg.EventID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
-	if !shouldProcess {
+	if processed {
 		h.logger.Info("notification.push event already processed (idempotent)",
+			"event_id", msg.EventID,
 			"message_id", msg.MessageID,
 			"notification_id", event.NotificationID,
 		)
@@ -237,11 +247,13 @@ func (h *NotificationPushHandler) Handle(ctx context.Context, msg *consumer.SQSM
 	)
 
 	// Mark as completed in inbox (auto-commit)
-	if err := h.inbox.Complete(ctx, "notification", msg.MessageID); err != nil {
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	if err := h.inbox.Complete(ctx, "notification", msg.EventID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
 	h.logger.Info("notification.push event processed successfully",
+		"event_id", msg.EventID,
 		"message_id", msg.MessageID,
 		"notification_id", event.NotificationID,
 	)

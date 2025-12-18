@@ -57,13 +57,15 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	defer tx.Rollback(ctx)
 
 	// Check idempotency using InboxRepository (within transaction)
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
 	inboxTx := h.inbox.WithTx(tx)
-	shouldProcess, err := inboxTx.TryStart(ctx, "user", msg.MessageID)
+	processed, err := inboxTx.IsProcessed(ctx, "user", msg.EventID)
 	if err != nil {
 		return fmt.Errorf("failed to check inbox: %w", err)
 	}
-	if !shouldProcess {
+	if processed {
 		h.logger.Info("user.registered event already processed (idempotent)",
+			"event_id", msg.EventID,
 			"message_id", msg.MessageID,
 			"user_id", event.UserID,
 		)
@@ -74,18 +76,19 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	h.sleepConfig.Sleep()
 
 	// Insert welcome credit record
-	// This ensures we don't create duplicate welcome credits for the same message
+	// This ensures we don't create duplicate welcome credits for the same event
 	query := `
-		INSERT INTO user_welcome_credits (message_id, user_id, credit_amount, granted_at)
+		INSERT INTO user_welcome_credits (event_id, user_id, credit_amount, granted_at)
 		VALUES ($1, $2, $3, NOW())
 	`
-	_, err = tx.Exec(ctx, query, msg.MessageID, event.UserID, 1000)
+	_, err = tx.Exec(ctx, query, msg.EventID, event.UserID, 1000)
 	if err != nil {
 		return fmt.Errorf("failed to insert welcome credit: %w", err)
 	}
 
 	// Mark as completed in inbox
-	if err := inboxTx.Complete(ctx, "user", msg.MessageID); err != nil {
+	// CRITICAL: Use msg.EventID (Outbox ID), NOT msg.MessageID
+	if err := inboxTx.Complete(ctx, "user", msg.EventID); err != nil {
 		return fmt.Errorf("failed to mark as completed: %w", err)
 	}
 
@@ -94,6 +97,7 @@ func (h *UserRegisteredHandler) Handle(ctx context.Context, msg *consumer.SQSMes
 	}
 
 	h.logger.Info("user.registered event processed successfully",
+		"event_id", msg.EventID,
 		"message_id", msg.MessageID,
 		"user_id", event.UserID,
 		"credit_granted", 1000,
