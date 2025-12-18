@@ -55,8 +55,8 @@ const (
 		    retry_count = retry_count + 1,
 		    next_retry_at = now() + (
 		        LEAST(
-		            $3::interval * POWER(2, retry_count + 1),
-		            $4::interval
+		            ($3 * interval '1 second') * POWER(2, retry_count + 1),
+		            ($4 * interval '1 second')
 		        ) * (0.5 + random() * 0.5)
 		    ),
 		    updated_at = now()
@@ -96,8 +96,8 @@ const (
 		    retry_count = retry_count + 1,
 		    next_retry_at = now() + (
 		        LEAST(
-		            $1::interval * POWER(2, retry_count + 1),
-		            $2::interval
+		            ($1 * interval '1 second') * POWER(2, retry_count + 1),
+		            ($2 * interval '1 second')
 		        ) * (0.5 + random() * 0.5)
 		    ),
 		    updated_at = now()
@@ -305,7 +305,7 @@ func (r *OutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg string
 	// Note: We use retry_count + 1 because retry_count will be incremented
 	query := fmt.Sprintf(queryUpdateToFailed, r.tableName)
 
-	result, err := r.q.Exec(ctx, query, id, errMsg, r.backoffBase, r.backoffMax)
+	result, err := r.q.Exec(ctx, query, id, errMsg, r.backoffBase.Seconds(), r.backoffMax.Seconds())
 	if err != nil {
 		return err
 	}
@@ -464,7 +464,7 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	query := fmt.Sprintf(queryReviveStuckPublishing, r.tableName)
 	intervalStr := fmt.Sprintf("%d seconds", int64(r.stuckPublishingThreshold.Seconds()))
-	result, err := r.q.Exec(ctx, query, r.backoffBase, r.backoffMax, intervalStr)
+	result, err := r.q.Exec(ctx, query, r.backoffBase.Seconds(), r.backoffMax.Seconds(), intervalStr)
 	if err != nil {
 		return 0, err
 	}

@@ -184,7 +184,7 @@ func (r *OutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg string
 			"status":        string(core.OutboxStatusFailed),
 			"error_message": errMsg,
 			"retry_count":   gorm.Expr("retry_count + 1"),
-			"next_retry_at": gorm.Expr("NOW() + (LEAST(?::interval * POWER(2, retry_count + 1), ?::interval) * (0.5 + random() * 0.5))", r.backoffBase, r.backoffMax),
+			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, retry_count + 1), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
 			"updated_at":    gorm.Expr("NOW()"),
 		})
 	if result.Error != nil {
@@ -323,7 +323,7 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 			"status":        string(core.OutboxStatusFailed),
 			"error_message": "revived from PUBLISHING (crash recovery)",
 			"retry_count":   gorm.Expr("retry_count + 1"),
-			"next_retry_at": gorm.Expr("NOW() + (LEAST(?::interval * POWER(2, retry_count + 1), ?::interval) * (0.5 + random() * 0.5))", r.backoffBase, r.backoffMax),
+			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, retry_count + 1), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
 			"updated_at":    gorm.Expr("NOW()"),
 		})
 	if result.Error != nil {
