@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: [1.23.x]
+        go-version: [1.23.x, 1.24.x, 1.25.x]
 
     services:
       postgres:
