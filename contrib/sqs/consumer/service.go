@@ -333,9 +333,7 @@ messageLoop:
 			defer wg.Done()
 			defer func() { <-sem }() // Release semaphore
 
-			// Create message-specific logger for better observability in parallel processing
-			msgLogger := logger.With("message_id", aws.ToString(msg.MessageId))
-			s.processMessage(ctx, msg, msgLogger)
+			s.processMessage(ctx, msg, logger)
 		}(sqsMsg)
 	}
 
@@ -390,7 +388,7 @@ func (s *Service) processMessage(ctx context.Context, sqsMsg sqstypes.Message, l
 	// Hook: OnConsumeSuccess
 	s.config.Hooks.callOnConsumeSuccess(ctx, msg, duration)
 
-	logger.InfoContext(ctx, "message consumed successfully")
+	logger.InfoContext(ctx, "message consumed successfully", "duration_ms", duration.Milliseconds())
 
 	// Update last processed timestamp for health checks (lock-free)
 	now := time.Now()
