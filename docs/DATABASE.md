@@ -45,6 +45,10 @@ CREATE TABLE consumer_inbox (
   completed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (consumer_name, event_id)
 );
+
+-- Indexes
+CREATE INDEX idx_consumer_inbox_completed_at ON consumer_inbox (completed_at);
+CREATE INDEX idx_consumer_inbox_event_id ON consumer_inbox (event_id);
 ```
 
 ## Indexes Explained
@@ -147,6 +151,42 @@ WHERE consumer_name = $1 AND event_id = $2;
 - B-tree index scan: O(log n)
 - Fast lookup for idempotency checking
 - Prevents duplicate INSERT via unique constraint
+
+#### `idx_consumer_inbox_completed_at`
+
+**Purpose**: Efficient cleanup of old completed events
+
+**Query pattern**:
+```sql
+DELETE FROM consumer_inbox
+WHERE completed_at < NOW() - INTERVAL '7 days';
+```
+
+**Performance**:
+- Index scan for range queries on completed_at
+- Enables efficient batch deletion of old records
+- Critical for preventing table bloat
+
+#### `idx_consumer_inbox_event_id`
+
+**Purpose**: Event ID lookups across multiple consumers
+
+**Query pattern**:
+```sql
+SELECT consumer_name, event_id, completed_at
+FROM consumer_inbox
+WHERE event_id = $1;
+```
+
+**Use cases**:
+- Debugging: Find which consumers processed a specific event
+- Monitoring: Track event processing across services
+- Auditing: Verify event delivery to multiple consumers
+
+**Performance**:
+- B-tree index scan: O(log n)
+- Enables efficient cross-consumer event lookups
+- Useful when event_id is known but consumer_name is not
 
 ## Query Performance Verification
 

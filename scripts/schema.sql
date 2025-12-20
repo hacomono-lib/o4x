@@ -78,3 +78,7 @@ COMMENT ON COLUMN consumer_inbox.completed_at IS 'Timestamp when event processin
 -- Index for cleanup queries (DELETE WHERE completed_at < ...)
 CREATE INDEX idx_consumer_inbox_completed_at
   ON consumer_inbox (completed_at);
+
+-- Index for event_id lookups across consumers
+CREATE INDEX idx_consumer_inbox_event_id
+  ON consumer_inbox (event_id);

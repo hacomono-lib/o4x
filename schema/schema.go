@@ -138,7 +138,11 @@ COMMENT ON COLUMN %s.completed_at IS 'Timestamp when event processing was comple
 -- Index for cleanup queries (DELETE WHERE completed_at < ...)
 CREATE INDEX idx_%s_completed_at
   ON %s (completed_at);
-`, tableName, tableName, tableName, tableName, tableName, tableName)
+
+-- Index for event_id lookups across consumers
+CREATE INDEX idx_%s_event_id
+  ON %s (event_id);
+`, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName)
 }
 
 // DropConsumerInboxDDL generates the DDL to drop the consumer_inbox table.

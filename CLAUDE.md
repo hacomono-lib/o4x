@@ -190,7 +190,7 @@ inboxRepo := pgx.NewInboxRepository(pool)
 - **Primary Key**: `(consumer_name, event_id)` - Ensures exactly-once processing
 - **CRITICAL**: `event_id` is the Outbox event ID (logical identity), NOT SQS MessageID
 - `completed_at` (TIMESTAMPTZ) - Only tracks completion timestamp
-- Index: `idx_consumer_inbox_completed_at` (for cleanup queries)
+- Indexes: `idx_consumer_inbox_completed_at` (for cleanup queries), `idx_consumer_inbox_event_id` (for event_id lookups across consumers)
 - Purpose: Atomic duplicate detection via composite primary key
 - Design: NO status field, NO locking - only tracks "completed or not"
 - Use `InboxRepository.IsProcessed()` and `Complete()` in handlers

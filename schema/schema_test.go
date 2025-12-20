@@ -100,6 +100,10 @@ func (s *SchemaSuite) TestConsumerInboxDDL_GeneratesCorrectSchema() {
 	assert.Contains(s.T(), ddl, "CREATE INDEX idx_consumer_inbox_completed_at")
 	assert.Contains(s.T(), ddl, "ON consumer_inbox (completed_at)")
 
+	// Check index for event_id lookups
+	assert.Contains(s.T(), ddl, "CREATE INDEX idx_consumer_inbox_event_id")
+	assert.Contains(s.T(), ddl, "ON consumer_inbox (event_id)")
+
 	// Check comments
 	assert.Contains(s.T(), ddl, "Consumer Inbox Schema")
 	assert.Contains(s.T(), ddl, "Track COMPLETED events only")
@@ -116,6 +120,8 @@ func (s *SchemaSuite) TestConsumerInboxDDL_WithCustomTableName() {
 	assert.Contains(s.T(), ddl, "CREATE TABLE custom_inbox")
 	assert.Contains(s.T(), ddl, "idx_custom_inbox_completed_at")
 	assert.Contains(s.T(), ddl, "ON custom_inbox (completed_at)")
+	assert.Contains(s.T(), ddl, "idx_custom_inbox_event_id")
+	assert.Contains(s.T(), ddl, "ON custom_inbox (event_id)")
 }
 
 func (s *SchemaSuite) TestDropConsumerInboxDDL_GeneratesCorrectStatements() {
