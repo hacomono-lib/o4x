@@ -719,6 +719,7 @@ func (s *MultiBatchPublisherSuite) TestPublish_OversizedPayload_ReturnsPermanent
 	assert.True(s.T(), !core.IsRetryable(err), "oversized error should not be retryable")
 	assert.ErrorIs(s.T(), err, core.ErrPayloadTooLarge)
 }
+
 // BuildMessageAttributesSuite tests buildMessageAttributes function
 type BuildMessageAttributesSuite struct {
 	suite.Suite

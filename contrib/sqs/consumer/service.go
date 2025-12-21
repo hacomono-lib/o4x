@@ -66,7 +66,7 @@ func DefaultServiceConfig(queueURL string) ServiceConfig {
 		MaxNumberOfMessages: 10,
 		WaitTimeSeconds:     20,
 		VisibilityTimeout:   30,
-		MaxAttempts:          5,
+		MaxAttempts:         5,
 		WorkerCount:         1,
 		MessageConcurrency:  1, // Sequential processing by default
 		ShutdownTimeout:     30 * time.Second,

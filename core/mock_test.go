@@ -66,7 +66,7 @@ func (m *MockOutboxRepository) Insert(ctx context.Context, params OutboxInsertPa
 		Payload:        params.Payload,
 		IdempotencyKey: params.IdempotencyKey,
 		Status:         OutboxStatusEnqueued,
-		MaxAttempts:     params.MaxAttempts,
+		MaxAttempts:    params.MaxAttempts,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}
@@ -314,7 +314,7 @@ func createTestOutbox(eventType string, payload interface{}) *Outbox {
 		Payload:        data,
 		IdempotencyKey: GenerateID(),
 		Status:         OutboxStatusEnqueued,
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}

@@ -542,8 +542,8 @@ func TestCallOnPartialBatchSuccess(t *testing.T) {
 			Payload:        []byte(`{}`),
 			IdempotencyKey: id,
 			Status:         OutboxStatusEnqueued,
-			AttemptCount:     0,
-			MaxAttempts:     5,
+			AttemptCount:   0,
+			MaxAttempts:    5,
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		}

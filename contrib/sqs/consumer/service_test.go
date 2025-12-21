@@ -675,7 +675,7 @@ func TestService_NewService_AllValidations(t *testing.T) {
 		WorkerCount:        1,
 		MessageConcurrency: 10,
 		WaitTimeSeconds:    20,
-		MaxAttempts:         5,
+		MaxAttempts:        5,
 	}
 
 	service := consumer.NewService(mockClient, mockHandler, cfg)

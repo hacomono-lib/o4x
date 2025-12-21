@@ -91,7 +91,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req domain.CreateOrderRe
 		EventType:      "order.created",
 		Payload:        payload,
 		IdempotencyKey: order.ID.String(),
-		MaxAttempts:     5,
+		MaxAttempts:    5,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to insert outbox message: %w", err)
 	}
@@ -149,7 +149,7 @@ func (s *OrderService) ConfirmOrder(ctx context.Context, orderID uuid.UUID) erro
 		EventType:      "order.confirmed",
 		Payload:        payload,
 		IdempotencyKey: fmt.Sprintf("order-confirmed-%s", orderID),
-		MaxAttempts:     5,
+		MaxAttempts:    5,
 	}); err != nil {
 		return fmt.Errorf("failed to insert outbox message: %w", err)
 	}

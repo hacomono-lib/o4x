@@ -555,8 +555,8 @@ func TestDispatcher_RunRequeueWorker(t *testing.T) {
 		Payload:        []byte(`{}`),
 		IdempotencyKey: "test-key",
 		Status:         OutboxStatusEnqueued,
-		AttemptCount:     1,
-		MaxAttempts:     5,
+		AttemptCount:   1,
+		MaxAttempts:    5,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}

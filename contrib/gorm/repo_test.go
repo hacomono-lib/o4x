@@ -87,7 +87,7 @@ func (s *OutboxRepositorySuite) TestInsert_CreatesNewOutboxMessage() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-1",
-		MaxAttempts:     5,
+		MaxAttempts:    5,
 	}
 
 	// Act
@@ -110,7 +110,7 @@ func (s *OutboxRepositorySuite) TestFetchAndLockToPublishing_ReturnsEnqueuedMess
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-2",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
@@ -147,7 +147,7 @@ func (s *OutboxRepositorySuite) TestUpdateToPublished_ChangesStatus() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-4",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
@@ -171,7 +171,7 @@ func (s *OutboxRepositorySuite) TestUpdateToFailed_ChangesStatusAndIncrementsRet
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-5",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
@@ -199,7 +199,7 @@ func (s *OutboxRepositorySuite) TestUpdateToDead_ChangesStatus() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-6",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
@@ -227,7 +227,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_MovesFailedToEnqueuedWithBacko
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-7",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 	// Set to PUBLISHING before calling UpdateToFailed
@@ -259,7 +259,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_RespectsExponentialBackoff() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-8",
-		MaxAttempts:     10,
+		MaxAttempts:    10,
 	})
 	s.Require().NoError(err)
 
@@ -303,7 +303,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_DoesNotRequeueMaxRetriesExceed
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-9",
-		MaxAttempts:     1,
+		MaxAttempts:    1,
 	})
 	s.Require().NoError(err)
 	// Set to PUBLISHING before calling UpdateToFailed
@@ -333,7 +333,7 @@ func (s *OutboxRepositorySuite) TestGetByID_ReturnsMessage() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-10",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
@@ -365,7 +365,7 @@ func (s *OutboxRepositorySuite) TestGetByIdempotencyKey_ReturnsMessage() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-11",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
@@ -398,7 +398,7 @@ func (s *OutboxRepositorySuite) TestReviveStuckPublishing_MovesPublishingToFaile
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-12",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
@@ -437,7 +437,7 @@ func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_AtomicallyLocksAn
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "test-idem-key-batch-" + string(rune('a'+i)),
-			MaxAttempts:     3,
+			MaxAttempts:    3,
 		})
 		s.Require().NoError(err)
 	}
@@ -463,7 +463,7 @@ func (s *OutboxRepositorySuite) TestUpdateBatchToPublished_UpdatesMultipleMessag
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "test-idem-key-batch2-" + string(rune('a'+i)),
-			MaxAttempts:     3,
+			MaxAttempts:    3,
 		})
 		s.Require().NoError(err)
 	}
@@ -499,7 +499,7 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_DeletesOldMessages() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-delete",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 	// Set to PUBLISHING before calling UpdateToPublished
@@ -538,7 +538,7 @@ func (s *OutboxRepositorySuite) TestWithTx_UsesTransactionForInsert() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-tx",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	assert.NoError(s.T(), err)
 
@@ -650,7 +650,7 @@ func (s *WithCustomTableNameSuite) TestWithOutboxTableName_UsesCustomTable() {
 		EventType:      "test.event",
 		Payload:        json.RawMessage(`{"key":"value"}`),
 		IdempotencyKey: "custom-table-key",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 
 	// Assert
@@ -676,7 +676,7 @@ func (s *OutboxRepositorySuite) TestFetchAndLockToPublishing_MultipleWorkersNoCo
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "concurrent-test-" + string(rune('0'+i)),
-			MaxAttempts:     3,
+			MaxAttempts:    3,
 		})
 		s.Require().NoError(err)
 	}
@@ -744,7 +744,7 @@ func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_MultipleWorkersNo
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "batch-concurrent-test-" + string(rune('a'+(i%26))),
-			MaxAttempts:     3,
+			MaxAttempts:    3,
 		})
 		s.Require().NoError(err)
 	}
@@ -952,7 +952,7 @@ func (s *ConfigOptionsSuite) TestWithStuckPublishingThreshold_CustomThreshold() 
 		EventType:      "test.event",
 		Payload:        json.RawMessage(`{"key":"value"}`),
 		IdempotencyKey: "threshold-test-key-gorm",
-		MaxAttempts:     3,
+		MaxAttempts:    3,
 	})
 	s.Require().NoError(err)
 
