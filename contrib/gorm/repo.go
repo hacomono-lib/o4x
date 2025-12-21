@@ -22,8 +22,8 @@ type outboxModel struct {
 	IdempotencyKey string     `gorm:"type:varchar(255);not null"`
 	Status         string     `gorm:"type:varchar(20);not null;default:'ENQUEUED'"`
 	ErrorMessage   *string    `gorm:"type:text"`
-	RetryCount     int        `gorm:"not null;default:0"`
-	MaxRetries     int        `gorm:"not null;default:10"`
+	AttemptCount   int        `gorm:"not null;default:1"`
+	MaxAttempts    int        `gorm:"not null;default:10"`
 	NextRetryAt    *time.Time `gorm:"type:timestamptz"`
 	CreatedAt      time.Time  `gorm:"autoCreateTime"`
 	UpdatedAt      time.Time  `gorm:"autoUpdateTime"`
@@ -93,7 +93,7 @@ func (r *OutboxRepository) Insert(ctx context.Context, params core.OutboxInsertP
 		Metadata:       params.Metadata,
 		IdempotencyKey: params.IdempotencyKey,
 		Status:         string(core.OutboxStatusEnqueued),
-		MaxRetries:     params.MaxRetries,
+		MaxAttempts:    params.MaxAttempts,
 	}
 
 	result := r.db.WithContext(ctx).Table(r.tableName).Create(model)
@@ -130,8 +130,8 @@ func (r *OutboxRepository) FetchAndLockToPublishing(ctx context.Context) (*core.
 			WHERE ` + r.tableName + `.id = locked.id
 			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.event_type, ` + r.tableName + `.payload,
 			          ` + r.tableName + `.metadata, ` + r.tableName + `.idempotency_key, ` + r.tableName + `.status,
-			          ` + r.tableName + `.error_message, ` + r.tableName + `.retry_count,
-			          ` + r.tableName + `.max_retries, ` + r.tableName + `.created_at, ` + r.tableName + `.updated_at
+			          ` + r.tableName + `.error_message, ` + r.tableName + `.attempt_count,
+			          ` + r.tableName + `.max_attempts, ` + r.tableName + `.created_at, ` + r.tableName + `.updated_at
 		)
 		SELECT * FROM updated
 	`
@@ -171,11 +171,11 @@ func (r *OutboxRepository) UpdateToPublished(ctx context.Context, id string) err
 
 // UpdateToFailed marks the message as FAILED with error info
 // Only updates messages in PUBLISHING state to prevent invalid state transitions
-// Increments retry_count and sets next_retry_at based on exponential backoff with jitter
+// Increments attempt_count and sets next_retry_at based on exponential backoff with jitter
 // FIXED: Calculates next_retry_at in PostgreSQL to avoid data race
 func (r *OutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg string) error {
 	// Calculate backoff in PostgreSQL for atomicity
-	// Formula: now() + (backoffBase * 2^(retry_count + 1) * jitter), capped at backoffMax
+	// Formula: now() + (backoffBase * 2^attempt_count * jitter), capped at backoffMax
 	// Jitter is (0.5 + random() * 0.5) to prevent thundering herd problem
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
@@ -183,8 +183,8 @@ func (r *OutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg string
 		Updates(map[string]interface{}{
 			"status":        string(core.OutboxStatusFailed),
 			"error_message": errMsg,
-			"retry_count":   gorm.Expr("retry_count + 1"),
-			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, retry_count + 1), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
+			"attempt_count": gorm.Expr("attempt_count + 1"),
+			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, attempt_count), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
 			"updated_at":    gorm.Expr("NOW()"),
 		})
 	if result.Error != nil {
@@ -205,6 +205,7 @@ func (r *OutboxRepository) UpdateToDead(ctx context.Context, id, errMsg string) 
 		Updates(map[string]interface{}{
 			"status":        string(core.OutboxStatusDead),
 			"error_message": errMsg,
+			"attempt_count": gorm.Expr("max_attempts"),
 			"updated_at":    gorm.Expr("NOW()"),
 		})
 	if result.Error != nil {
@@ -224,7 +225,7 @@ func (r *OutboxRepository) UpdateToDead(ctx context.Context, id, errMsg string) 
 func (r *OutboxRepository) RequeueFailed(ctx context.Context) (int64, error) {
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
-		Where("status = ? AND retry_count < max_retries AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()",
+		Where("status = ? AND attempt_count < max_attempts AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()",
 			string(core.OutboxStatusFailed)).
 		Updates(map[string]interface{}{
 			"status":     string(core.OutboxStatusEnqueued),
@@ -300,7 +301,7 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 		Payload:        data,
 		Metadata:       metadataBytes,
 		IdempotencyKey: idempotencyKey,
-		MaxRetries:     maxRetries,
+		MaxAttempts:    maxRetries,
 	})
 }
 
@@ -311,9 +312,9 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 // Only revives messages that have been in PUBLISHING state for more than 5 minutes,
 // preventing recovery of messages actively being processed.
 //
-// Note: retry_count is incremented to ensure max_retries limit is enforced.
+// Note: attempt_count is incremented to ensure max_attempts limit is enforced.
 // This prevents infinite retries for messages that consistently fail.
-// Messages exceeding max_retries will be moved to DEAD on next retry attempt.
+// Messages reaching max_attempts will be moved to DEAD on next retry attempt.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	threshold := time.Now().Add(-r.stuckPublishingThreshold)
 	result := r.db.WithContext(ctx).
@@ -322,8 +323,8 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 		Updates(map[string]interface{}{
 			"status":        string(core.OutboxStatusFailed),
 			"error_message": "revived from PUBLISHING (crash recovery)",
-			"retry_count":   gorm.Expr("retry_count + 1"),
-			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, retry_count + 1), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
+			"attempt_count": gorm.Expr("attempt_count + 1"),
+			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, attempt_count), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
 			"updated_at":    gorm.Expr("NOW()"),
 		})
 	if result.Error != nil {
@@ -342,8 +343,8 @@ func (r *OutboxRepository) modelToCore(m *outboxModel) *core.Outbox {
 		IdempotencyKey: m.IdempotencyKey,
 		Status:         core.OutboxStatus(m.Status),
 		ErrorMessage:   m.ErrorMessage,
-		RetryCount:     m.RetryCount,
-		MaxRetries:     m.MaxRetries,
+		AttemptCount:   m.AttemptCount,
+		MaxAttempts:    m.MaxAttempts,
 		NextRetryAt:    m.NextRetryAt,
 		CreatedAt:      m.CreatedAt,
 		UpdatedAt:      m.UpdatedAt,
@@ -371,8 +372,8 @@ func (r *OutboxRepository) FetchLockAndMarkPublishing(ctx context.Context, limit
 			WHERE ` + r.tableName + `.id = locked.id
 			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.event_type, ` + r.tableName + `.payload,
 			          ` + r.tableName + `.metadata, ` + r.tableName + `.idempotency_key, ` + r.tableName + `.status,
-			          ` + r.tableName + `.error_message, ` + r.tableName + `.retry_count,
-			          ` + r.tableName + `.max_retries, ` + r.tableName + `.created_at, ` + r.tableName + `.updated_at
+			          ` + r.tableName + `.error_message, ` + r.tableName + `.attempt_count,
+			          ` + r.tableName + `.max_attempts, ` + r.tableName + `.created_at, ` + r.tableName + `.updated_at
 		)
 		SELECT * FROM updated
 	`

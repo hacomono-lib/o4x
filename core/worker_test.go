@@ -85,12 +85,12 @@ func (s *WorkerSuite) TestWorker_HandlesPublishFailure() {
 	// Assert
 	updatedMsg := s.repo.GetMessage(msg.ID)
 	assert.Equal(s.T(), OutboxStatusFailed, updatedMsg.Status)
-	assert.Equal(s.T(), 1, updatedMsg.RetryCount)
+	assert.Equal(s.T(), 1, updatedMsg.AttemptCount)
 }
 
 func (s *WorkerSuite) TestWorker_MarksMessageDeadAfterMaxRetries() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 3, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -108,6 +108,7 @@ func (s *WorkerSuite) TestWorker_MarksMessageDeadAfterMaxRetries() {
 	// Assert
 	updatedMsg := s.repo.GetMessage(msg.ID)
 	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status)
+	assert.Equal(s.T(), updatedMsg.MaxAttempts, updatedMsg.AttemptCount, "attempt_count should equal max_attempts when DEAD")
 }
 
 func (s *WorkerSuite) TestWorker_MarksMessageDeadOnPermanentError() {
@@ -239,7 +240,7 @@ func (s *WorkerSuite) TestWorker_CallsOnPublishFailureHook() {
 
 func (s *WorkerSuite) TestWorker_CallsOnMessageDeadHook() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 3, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {

@@ -77,7 +77,7 @@ func (s *UserService) RegisterUser(ctx context.Context, req domain.CreateUserReq
 		EventType:      "user.registered",
 		Payload:        payload,
 		IdempotencyKey: user.ID.String(),
-		MaxRetries:     5,
+		MaxAttempts:     5,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to insert outbox message: %w", err)
 	}
@@ -124,7 +124,7 @@ func (s *UserService) UpdateUser(ctx context.Context, userID uuid.UUID, req doma
 		EventType:      "user.updated",
 		Payload:        payload,
 		IdempotencyKey: fmt.Sprintf("user-updated-%s-%d", userID, time.Now().UnixNano()),
-		MaxRetries:     5,
+		MaxAttempts:     5,
 	}); err != nil {
 		return fmt.Errorf("failed to insert outbox message: %w", err)
 	}

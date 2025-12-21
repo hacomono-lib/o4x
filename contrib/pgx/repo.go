@@ -19,10 +19,10 @@ import (
 // %s placeholder is used for table name (validated during repository initialization)
 const (
 	queryInsert = `
-		INSERT INTO %s (id, event_type, payload, metadata, idempotency_key, status, max_retries)
+		INSERT INTO %s (id, event_type, payload, metadata, idempotency_key, status, max_attempts)
 		VALUES ($1, $2, $3, $4, $5, 'ENQUEUED', $6)
 		RETURNING id, event_type, payload, metadata, idempotency_key, status, error_message,
-		          retry_count, max_retries, created_at, updated_at`
+		          attempt_count, max_attempts, created_at, updated_at`
 
 	queryFetchAndLockToPublishing = `
 		WITH locked AS (
@@ -38,8 +38,8 @@ const (
 			FROM locked
 			WHERE %s.id = locked.id
 			RETURNING %s.id, %s.event_type, %s.payload, %s.metadata, %s.idempotency_key,
-			          %s.status, %s.error_message, %s.retry_count,
-			          %s.max_retries, %s.created_at, %s.updated_at
+			          %s.status, %s.error_message, %s.attempt_count,
+			          %s.max_attempts, %s.created_at, %s.updated_at
 		)
 		SELECT * FROM updated`
 
@@ -52,10 +52,10 @@ const (
 		UPDATE %s
 		SET status = 'FAILED',
 		    error_message = $2,
-		    retry_count = retry_count + 1,
+		    attempt_count = attempt_count + 1,
 		    next_retry_at = now() + (
 		        LEAST(
-		            ($3 * interval '1 second') * POWER(2, retry_count + 1),
+		            ($3 * interval '1 second') * POWER(2, attempt_count),
 		            ($4 * interval '1 second')
 		        ) * (0.5 + random() * 0.5)
 		    ),
@@ -66,6 +66,7 @@ const (
 		UPDATE %s
 		SET status = 'DEAD',
 		    error_message = $2,
+		    attempt_count = max_attempts,
 		    updated_at = now()
 		WHERE id = $1 AND status = 'PUBLISHING'`
 
@@ -73,19 +74,19 @@ const (
 		UPDATE %s
 		SET status = 'ENQUEUED', updated_at = now()
 		WHERE status = 'FAILED'
-		  AND retry_count < max_retries
+		  AND attempt_count < max_attempts
 		  AND next_retry_at IS NOT NULL
 		  AND next_retry_at <= now()`
 
 	queryGetByID = `
 		SELECT id, event_type, payload, metadata, idempotency_key, status, error_message,
-		       retry_count, max_retries, next_retry_at, created_at, updated_at
+		       attempt_count, max_attempts, next_retry_at, created_at, updated_at
 		FROM %s
 		WHERE id = $1`
 
 	queryGetByIdempotencyKey = `
 		SELECT id, event_type, payload, metadata, idempotency_key, status, error_message,
-		       retry_count, max_retries, next_retry_at, created_at, updated_at
+		       attempt_count, max_attempts, next_retry_at, created_at, updated_at
 		FROM %s
 		WHERE event_type = $1 AND idempotency_key = $2`
 
@@ -93,10 +94,10 @@ const (
 		UPDATE %s
 		SET status = 'FAILED',
 		    error_message = 'revived from PUBLISHING (crash recovery)',
-		    retry_count = retry_count + 1,
+		    attempt_count = attempt_count + 1,
 		    next_retry_at = now() + (
 		        LEAST(
-		            ($1 * interval '1 second') * POWER(2, retry_count + 1),
+		            ($1 * interval '1 second') * POWER(2, attempt_count),
 		            ($2 * interval '1 second')
 		        ) * (0.5 + random() * 0.5)
 		    ),
@@ -118,8 +119,8 @@ const (
 			FROM locked
 			WHERE %s.id = locked.id
 			RETURNING %s.id, %s.event_type, %s.payload, %s.metadata, %s.idempotency_key,
-			          %s.status, %s.error_message, %s.retry_count,
-			          %s.max_retries, %s.created_at, %s.updated_at
+			          %s.status, %s.error_message, %s.attempt_count,
+			          %s.max_attempts, %s.created_at, %s.updated_at
 		)
 		SELECT * FROM updated`
 
@@ -211,7 +212,7 @@ func (r *OutboxRepository) Insert(ctx context.Context, params core.OutboxInsertP
 		params.Payload,
 		params.Metadata,
 		params.IdempotencyKey,
-		params.MaxRetries,
+		params.MaxAttempts,
 	).Scan(
 		&outbox.ID,
 		&outbox.EventType,
@@ -220,8 +221,8 @@ func (r *OutboxRepository) Insert(ctx context.Context, params core.OutboxInsertP
 		&outbox.IdempotencyKey,
 		&outbox.Status,
 		&errMsg,
-		&outbox.RetryCount,
-		&outbox.MaxRetries,
+		&outbox.AttemptCount,
+		&outbox.MaxAttempts,
 		&outbox.CreatedAt,
 		&outbox.UpdatedAt,
 	)
@@ -262,8 +263,8 @@ func (r *OutboxRepository) FetchAndLockToPublishing(ctx context.Context) (*core.
 		&outbox.IdempotencyKey,
 		&outbox.Status,
 		&errMsg,
-		&outbox.RetryCount,
-		&outbox.MaxRetries,
+		&outbox.AttemptCount,
+		&outbox.MaxAttempts,
 		&outbox.CreatedAt,
 		&outbox.UpdatedAt,
 	)
@@ -297,12 +298,12 @@ func (r *OutboxRepository) UpdateToPublished(ctx context.Context, id string) err
 
 // UpdateToFailed marks the message as FAILED with error info
 // Only updates messages in PUBLISHING state to prevent invalid state transitions
-// Increments retry_count and sets next_retry_at based on exponential backoff
+// Increments attempt_count and sets next_retry_at based on exponential backoff
 // FIXED: Calculates next_retry_at in PostgreSQL to avoid data race
 func (r *OutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg string) error {
 	// Calculate backoff in PostgreSQL for atomicity
-	// Formula: now() + (backoffBase * 2^(retry_count + 1)), capped at backoffMax
-	// Note: We use retry_count + 1 because retry_count will be incremented
+	// Formula: now() + (backoffBase * 2^attempt_count), capped at backoffMax
+	// Note: attempt_count is used directly (already incremented in the query)
 	query := fmt.Sprintf(queryUpdateToFailed, r.tableName)
 
 	result, err := r.q.Exec(ctx, query, id, errMsg, r.backoffBase.Seconds(), r.backoffMax.Seconds())
@@ -360,8 +361,8 @@ func (r *OutboxRepository) GetByID(ctx context.Context, id string) (*core.Outbox
 		&outbox.IdempotencyKey,
 		&outbox.Status,
 		&errMsg,
-		&outbox.RetryCount,
-		&outbox.MaxRetries,
+		&outbox.AttemptCount,
+		&outbox.MaxAttempts,
 		&nextRetryAt,
 		&outbox.CreatedAt,
 		&outbox.UpdatedAt,
@@ -399,8 +400,8 @@ func (r *OutboxRepository) GetByIdempotencyKey(ctx context.Context, eventType, i
 		&outbox.IdempotencyKey,
 		&outbox.Status,
 		&errMsg,
-		&outbox.RetryCount,
-		&outbox.MaxRetries,
+		&outbox.AttemptCount,
+		&outbox.MaxAttempts,
 		&nextRetryAt,
 		&outbox.CreatedAt,
 		&outbox.UpdatedAt,
@@ -447,7 +448,7 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 		Payload:        data,
 		Metadata:       metadataBytes,
 		IdempotencyKey: idempotencyKey,
-		MaxRetries:     maxRetries,
+		MaxAttempts:    maxRetries,
 	})
 }
 
@@ -458,9 +459,9 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 // Only revives messages that have been in PUBLISHING state for more than the configured
 // threshold (default: 5 minutes), preventing recovery of messages actively being processed.
 //
-// Note: retry_count is incremented to ensure max_retries limit is enforced.
+// Note: attempt_count is incremented to ensure max_attempts limit is enforced.
 // This prevents infinite retries for messages that consistently fail.
-// Messages exceeding max_retries will be moved to DEAD on next retry attempt.
+// Messages reaching max_attempts will be moved to DEAD on next retry attempt.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	query := fmt.Sprintf(queryReviveStuckPublishing, r.tableName)
 	intervalStr := fmt.Sprintf("%d seconds", int64(r.stuckPublishingThreshold.Seconds()))
@@ -501,8 +502,8 @@ func (r *OutboxRepository) FetchLockAndMarkPublishing(ctx context.Context, limit
 			&outbox.IdempotencyKey,
 			&outbox.Status,
 			&errMsg,
-			&outbox.RetryCount,
-			&outbox.MaxRetries,
+			&outbox.AttemptCount,
+			&outbox.MaxAttempts,
 			&outbox.CreatedAt,
 			&outbox.UpdatedAt,
 		)

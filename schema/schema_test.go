@@ -40,8 +40,8 @@ func (s *SchemaSuite) TestOutboxDDL_GeneratesCorrectSchema() {
 	assert.Contains(s.T(), ddl, "idempotency_key  TEXT NOT NULL")
 	assert.Contains(s.T(), ddl, "status           outbox_status NOT NULL DEFAULT 'ENQUEUED'")
 	assert.Contains(s.T(), ddl, "error_message    TEXT")
-	assert.Contains(s.T(), ddl, "retry_count      INT NOT NULL DEFAULT 0")
-	assert.Contains(s.T(), ddl, "max_retries      INT NOT NULL DEFAULT 10")
+	assert.Contains(s.T(), ddl, "attempt_count    INT NOT NULL DEFAULT 1")
+	assert.Contains(s.T(), ddl, "max_attempts     INT NOT NULL DEFAULT 10")
 	assert.Contains(s.T(), ddl, "created_at       TIMESTAMPTZ NOT NULL DEFAULT now()")
 	assert.Contains(s.T(), ddl, "updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()")
 

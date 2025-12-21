@@ -97,7 +97,7 @@ func CreateOrder(ctx context.Context, db *gorm.DB, order Order) error {
         EventType:      "order.created",
         Payload:        payload,
         IdempotencyKey: fmt.Sprintf("order-%s", order.ID),
-        MaxRetries:     10,
+        MaxAttempts:     10,
     })
     if err != nil {
         return err
@@ -120,7 +120,7 @@ repo.Insert(ctx, core.OutboxInsertParams{
     EventType:      "user.created",
     Payload:        json.RawMessage(`{"user_id": "123"}`),
     IdempotencyKey: "user-123-created",
-    MaxRetries:     10,
+    MaxAttempts:     10,
 })
 
 // Insert with JSON marshaling
@@ -293,7 +293,7 @@ db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 ## Best Practices
 
 1. **Always use transactions** - Use `WithTx()` to ensure atomicity with your business logic
-2. **Set appropriate MaxRetries** - Based on your use case (typically 5-10)
+2. **Set appropriate MaxAttempts** - Based on your use case (typically 5-10)
 3. **Use meaningful idempotency keys** - Make them unique per event (e.g., `order-{id}-created`)
 4. **Configure connection pool** - Based on your dispatcher worker count and load
 5. **Create indexes** - Especially on `(status, created_at)` for fast polling
@@ -329,7 +329,7 @@ func CreateUserWithEvent(ctx context.Context, db *gorm.DB, user *User) error {
         EventType:      "user.created",
         Payload:        payload,
         IdempotencyKey: fmt.Sprintf("user-%d-created", user.ID),
-        MaxRetries:     10,
+        MaxAttempts:     10,
     })
     if err != nil {
         return err
@@ -351,7 +351,7 @@ func (u *User) AfterCreate(tx *gorm.DB) error {
         EventType:      "user.created",
         Payload:        payload,
         IdempotencyKey: fmt.Sprintf("user-%d-created", u.ID),
-        MaxRetries:     10,
+        MaxAttempts:     10,
     })
     return err
 }
@@ -377,7 +377,7 @@ func CreateOrdersWithEvents(ctx context.Context, db *gorm.DB, orders []Order) er
             EventType:      "order.created",
             Payload:        payload,
             IdempotencyKey: fmt.Sprintf("order-%s", order.ID),
-            MaxRetries:     10,
+            MaxAttempts:     10,
         })
         if err != nil {
             return err

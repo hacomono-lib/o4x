@@ -84,7 +84,7 @@ func (s *NotificationService) SendNotification(ctx context.Context, req domain.S
 		EventType:      eventType,
 		Payload:        payload,
 		IdempotencyKey: notification.ID.String(),
-		MaxRetries:     3, // Lower retries for notifications
+		MaxAttempts:     3, // Lower retries for notifications
 	}); err != nil {
 		return nil, fmt.Errorf("failed to insert outbox message: %w", err)
 	}

@@ -25,8 +25,8 @@ CREATE TABLE outbox (
   idempotency_key  TEXT NOT NULL,
   status           outbox_status NOT NULL DEFAULT 'ENQUEUED',
   error_message    TEXT,
-  retry_count      INT NOT NULL DEFAULT 0,
-  max_retries      INT NOT NULL DEFAULT 10,
+  attempt_count      INT NOT NULL DEFAULT 0,
+  max_attempts      INT NOT NULL DEFAULT 10,
   next_retry_at    TIMESTAMPTZ,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -85,7 +85,7 @@ FOR UPDATE SKIP LOCKED;
 UPDATE outbox
 SET status = 'ENQUEUED', updated_at = now()
 WHERE status = 'FAILED'
-  AND retry_count < max_retries
+  AND attempt_count < max_attempts
   AND next_retry_at IS NOT NULL
   AND next_retry_at <= now();
 ```
@@ -99,18 +99,18 @@ CREATE INDEX idx_outbox_status_next_retry_at
 
 - Only indexes FAILED messages (smaller index size)
 - Covers the `status = 'FAILED' AND next_retry_at IS NOT NULL` conditions
-- Does NOT include `retry_count` to keep index small
+- Does NOT include `attempt_count` to keep index small
 
 **Trade-off**:
 - ✅ Smaller index size (only FAILED messages)
 - ✅ Faster index updates
-- ⚠️ May scan extra rows if many FAILED messages have `retry_count >= max_retries`
+- ⚠️ May scan extra rows if many FAILED messages have `attempt_count >= max_attempts`
 
-**When to add `retry_count` to index**:
-If you frequently have >10,000 FAILED messages with varying retry_count, consider:
+**When to add `attempt_count` to index**:
+If you frequently have >10,000 FAILED messages with varying attempt_count, consider:
 ```sql
 CREATE INDEX idx_outbox_retry_failed
-  ON outbox (status, retry_count, next_retry_at)
+  ON outbox (status, attempt_count, next_retry_at)
   WHERE status = 'FAILED' AND next_retry_at IS NOT NULL;
 ```
 
@@ -227,7 +227,7 @@ EXPLAIN (ANALYZE, BUFFERS)
 UPDATE outbox
 SET status = 'ENQUEUED', updated_at = now()
 WHERE status = 'FAILED'
-  AND retry_count < max_retries
+  AND attempt_count < max_attempts
   AND next_retry_at IS NOT NULL
   AND next_retry_at <= now();
 ```
@@ -237,18 +237,18 @@ WHERE status = 'FAILED'
 Update on outbox  (cost=8.17..20.35 rows=10 width=100) (actual time=0.123..0.123 rows=0 loops=1)
   ->  Index Scan using idx_outbox_status_next_retry_at on outbox  (cost=0.42..20.35 rows=10 width=100) (actual time=0.120..0.120 rows=0 loops=1)
         Index Cond: ((status = 'FAILED'::outbox_status) AND (next_retry_at IS NOT NULL) AND (next_retry_at <= now()))
-        Filter: (retry_count < max_retries)
+        Filter: (attempt_count < max_attempts)
 ```
 
 **Good signs**:
 - ✅ `Index Scan` on `idx_outbox_status_next_retry_at`
-- ✅ `Filter: (retry_count < max_retries)` appears AFTER index scan
+- ✅ `Filter: (attempt_count < max_attempts)` appears AFTER index scan
 - ✅ Low `rows` count in Index Scan
 
 **Potential issue**:
-If `rows` in Index Scan >> `rows` in Update (e.g., index scans 10000 rows but updates only 10), it means many FAILED messages have `retry_count >= max_retries`. Consider:
+If `rows` in Index Scan >> `rows` in Update (e.g., index scans 10000 rows but updates only 10), it means many FAILED messages have `attempt_count >= max_attempts`. Consider:
 1. Running periodic cleanup: `DELETE FROM outbox WHERE status = 'DEAD' AND updated_at < now() - interval '30 days'`
-2. Adding `retry_count` to the index (see "Index Tuning" below)
+2. Adding `attempt_count` to the index (see "Index Tuning" below)
 
 ## Index Tuning
 
@@ -258,7 +258,7 @@ If `rows` in Index Scan >> `rows` in Update (e.g., index scans 10000 rows but up
 
 **Diagnosis**:
 ```sql
-SELECT status, COUNT(*), AVG(retry_count), MAX(retry_count)
+SELECT status, COUNT(*), AVG(attempt_count), MAX(attempt_count)
 FROM outbox
 GROUP BY status;
 ```
@@ -270,19 +270,19 @@ GROUP BY status;
  FAILED  | 100000 |  8  |  10
 ```
 
-**Solution**: Add retry_count to index
+**Solution**: Add attempt_count to index
 ```sql
 DROP INDEX idx_outbox_status_next_retry_at;
 
 CREATE INDEX idx_outbox_retry_failed
-  ON outbox (status, retry_count, next_retry_at)
+  ON outbox (status, attempt_count, next_retry_at)
   WHERE status = 'FAILED' AND next_retry_at IS NOT NULL;
 ```
 
 **Trade-off**:
 - ✅ Faster RequeueFailed (filters out near-max-retries messages)
 - ❌ Larger index size (~1.5x)
-- ❌ Slower UPDATE (index maintenance on retry_count change)
+- ❌ Slower UPDATE (index maintenance on attempt_count change)
 
 ### Scenario 2: Table Bloat
 
@@ -380,7 +380,7 @@ ORDER BY count DESC;
 
 **Check stuck PUBLISHING messages**:
 ```sql
-SELECT id, event_type, retry_count, max_retries,
+SELECT id, event_type, attempt_count, max_attempts,
        updated_at, NOW() - updated_at as stuck_duration, error_message
 FROM outbox
 WHERE status = 'PUBLISHING'
@@ -390,9 +390,9 @@ ORDER BY updated_at ASC;
 
 **Check high retry count messages**:
 ```sql
-SELECT id, event_type, status, retry_count, max_retries, error_message
+SELECT id, event_type, status, attempt_count, max_attempts, error_message
 FROM outbox
-WHERE retry_count >= max_retries - 2
+WHERE attempt_count >= max_attempts - 2
   AND status IN ('FAILED', 'DEAD')
 ORDER BY created_at DESC
 LIMIT 20;
@@ -413,7 +413,7 @@ Expected query performance for well-configured systems:
 **If queries exceed these baselines**:
 1. Run EXPLAIN ANALYZE to verify index usage
 2. Check for table bloat (run VACUUM)
-3. Consider adding retry_count to index (if many FAILED messages)
+3. Consider adding attempt_count to index (if many FAILED messages)
 4. Verify connection pool is not exhausted
 
 ### Database Monitoring Checklist
@@ -431,4 +431,4 @@ Expected query performance for well-configured systems:
 ✅ **Quarterly**:
 - Review and optimize RequeueFailed performance
 - Consider archiving old DEAD messages to separate table
-- Evaluate if retry_count index is needed
+- Evaluate if attempt_count index is needed

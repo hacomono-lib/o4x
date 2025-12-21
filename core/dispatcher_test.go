@@ -232,12 +232,12 @@ func (s *DispatcherSuite) TestDispatcher_HandlesPublishFailure() {
 	// Assert
 	updatedMsg := s.repo.GetMessage(msg.ID)
 	assert.Equal(s.T(), OutboxStatusFailed, updatedMsg.Status)
-	assert.Equal(s.T(), 1, updatedMsg.RetryCount)
+	assert.Equal(s.T(), 1, updatedMsg.AttemptCount)
 }
 
 func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadAfterMaxRetries() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 3, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -266,6 +266,7 @@ func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadAfterMaxRetries() {
 	// Assert
 	updatedMsg := s.repo.GetMessage(msg.ID)
 	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status)
+	assert.Equal(s.T(), updatedMsg.MaxAttempts, updatedMsg.AttemptCount, "attempt_count should equal max_attempts when DEAD")
 }
 
 func (s *DispatcherSuite) TestDispatcher_MarksMessageDeadOnPermanentError() {
@@ -430,7 +431,7 @@ func (s *DispatcherSuite) TestDispatcher_CallsHooksOnPublishFailure() {
 
 func (s *DispatcherSuite) TestDispatcher_CallsHooksOnMessageDead() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 3, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
@@ -554,8 +555,8 @@ func TestDispatcher_RunRequeueWorker(t *testing.T) {
 		Payload:        []byte(`{}`),
 		IdempotencyKey: "test-key",
 		Status:         OutboxStatusEnqueued,
-		RetryCount:     1,
-		MaxRetries:     5,
+		AttemptCount:     1,
+		MaxAttempts:     5,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}

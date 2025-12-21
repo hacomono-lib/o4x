@@ -83,7 +83,7 @@ func (s *OutboxRepositorySuite) TestInsert_CreatesNewOutboxMessage() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-1",
-		MaxRetries:     5,
+		MaxAttempts:     5,
 	}
 
 	// Act
@@ -95,8 +95,8 @@ func (s *OutboxRepositorySuite) TestInsert_CreatesNewOutboxMessage() {
 	assert.Equal(s.T(), "test.event", msg.EventType)
 	assert.Equal(s.T(), "test-idem-key-1", msg.IdempotencyKey)
 	assert.Equal(s.T(), core.OutboxStatusEnqueued, msg.Status)
-	assert.Equal(s.T(), 0, msg.RetryCount)
-	assert.Equal(s.T(), 5, msg.MaxRetries)
+	assert.Equal(s.T(), 1, msg.AttemptCount)
+	assert.Equal(s.T(), 5, msg.MaxAttempts)
 }
 
 func (s *OutboxRepositorySuite) TestFetchAndLockToPublishing_ReturnsEnqueuedMessageAndMarksPublishing() {
@@ -106,7 +106,7 @@ func (s *OutboxRepositorySuite) TestFetchAndLockToPublishing_ReturnsEnqueuedMess
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-2",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -143,7 +143,7 @@ func (s *OutboxRepositorySuite) TestUpdateToPublished_ChangesStatus() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-4",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -167,7 +167,7 @@ func (s *OutboxRepositorySuite) TestUpdateToFailed_ChangesStatusAndIncrementsRet
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-5",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -182,7 +182,7 @@ func (s *OutboxRepositorySuite) TestUpdateToFailed_ChangesStatusAndIncrementsRet
 	assert.NoError(s.T(), err)
 	msg, _ := s.repo.GetByID(ctx, locked.ID)
 	assert.Equal(s.T(), core.OutboxStatusFailed, msg.Status)
-	assert.Equal(s.T(), 1, msg.RetryCount)
+	assert.Equal(s.T(), 2, msg.AttemptCount)
 	assert.NotNil(s.T(), msg.ErrorMessage)
 	assert.Equal(s.T(), "test error message", *msg.ErrorMessage)
 	assert.NotNil(s.T(), msg.NextRetryAt)
@@ -195,7 +195,7 @@ func (s *OutboxRepositorySuite) TestUpdateToDead_ChangesStatus() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-6",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -223,7 +223,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_MovesFailedToEnqueuedWithBacko
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-7",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -257,7 +257,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_RespectsExponentialBackoff() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-8",
-		MaxRetries:     10,
+		MaxAttempts:     10,
 	})
 	s.Require().NoError(err)
 
@@ -300,7 +300,7 @@ func (s *OutboxRepositorySuite) TestRequeueFailed_DoesNotRequeueMaxRetriesExceed
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-9",
-		MaxRetries:     1,
+		MaxAttempts:     1,
 	})
 	s.Require().NoError(err)
 	// Set to PUBLISHING before calling UpdateToFailed
@@ -330,7 +330,7 @@ func (s *OutboxRepositorySuite) TestGetByID_ReturnsMessage() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-10",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -362,7 +362,7 @@ func (s *OutboxRepositorySuite) TestGetByIdempotencyKey_ReturnsMessage() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-11",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -395,7 +395,7 @@ func (s *OutboxRepositorySuite) TestReviveStuckPublishing_MovesPublishingToFaile
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-12",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -416,9 +416,9 @@ func (s *OutboxRepositorySuite) TestReviveStuckPublishing_MovesPublishingToFaile
 	assert.Equal(s.T(), int64(1), count)
 	revivedMsg, _ := s.repo.GetByID(ctx, inserted.ID)
 	assert.Equal(s.T(), core.OutboxStatusFailed, revivedMsg.Status)
-	// Note: retry_count is incremented during ReviveStuckPublishing
-	// to enforce max_retries limit and prevent infinite retries
-	assert.Equal(s.T(), 1, revivedMsg.RetryCount) // 0 → 1 (incremented)
+	// Note: attempt_count is incremented during ReviveStuckPublishing
+	// to enforce max_attempts limit and prevent infinite retries
+	assert.Equal(s.T(), 2, revivedMsg.AttemptCount) // 1 → 2 (incremented)
 	assert.NotNil(s.T(), revivedMsg.ErrorMessage)
 	assert.Equal(s.T(), "revived from PUBLISHING (crash recovery)", *revivedMsg.ErrorMessage)
 	assert.NotNil(s.T(), revivedMsg.NextRetryAt) // next_retry_at is set for exponential backoff
@@ -434,7 +434,7 @@ func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_AtomicallyLocksAn
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "test-idem-key-batch-" + string(rune('a'+i)),
-			MaxRetries:     3,
+			MaxAttempts:     3,
 		})
 		s.Require().NoError(err)
 	}
@@ -460,7 +460,7 @@ func (s *OutboxRepositorySuite) TestUpdateBatchToPublished_UpdatesMultipleMessag
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: "test-idem-key-batch2-" + string(rune('a'+i)),
-			MaxRetries:     3,
+			MaxAttempts:     3,
 		})
 		s.Require().NoError(err)
 	}
@@ -496,7 +496,7 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_DeletesOldMessages() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-delete",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 	// Set to PUBLISHING before calling UpdateToPublished
@@ -556,7 +556,7 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_E2E_ComprehensiveScenarios()
 			EventType:      tc.eventType,
 			Payload:        s.createPayload(map[string]interface{}{"test": "data"}),
 			IdempotencyKey: "e2e-" + tc.eventType,
-			MaxRetries:     3,
+			MaxAttempts:     3,
 		})
 		s.Require().NoError(err)
 		messageIDs[tc.eventType] = inserted.ID
@@ -625,7 +625,7 @@ func (s *OutboxRepositorySuite) TestWithTx_UsesTransactionForInsert() {
 		EventType:      "test.event",
 		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
 		IdempotencyKey: "test-idem-key-tx",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	assert.NoError(s.T(), err)
 
@@ -676,8 +676,8 @@ func (s *WithCustomTableNameSuite) SetupSuite() {
 			idempotency_key TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'ENQUEUED',
 			error_message TEXT,
-			retry_count INT NOT NULL DEFAULT 0,
-			max_retries INT NOT NULL DEFAULT 10,
+			attempt_count INT NOT NULL DEFAULT 1,
+			max_attempts INT NOT NULL DEFAULT 10,
 			next_retry_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -710,7 +710,7 @@ func (s *WithCustomTableNameSuite) TestWithOutboxTableName_UsesCustomTable() {
 		EventType:      "test.event",
 		Payload:        json.RawMessage(`{"key":"value"}`),
 		IdempotencyKey: "custom-table-key",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 
 	// Assert
@@ -803,7 +803,7 @@ func (s *ConfigOptionsSuite) TestWithStuckPublishingThreshold_CustomThreshold() 
 		EventType:      "test.event",
 		Payload:        json.RawMessage(`{"key":"value"}`),
 		IdempotencyKey: "threshold-test-key",
-		MaxRetries:     3,
+		MaxAttempts:     3,
 	})
 	s.Require().NoError(err)
 
@@ -843,7 +843,7 @@ func (s *OutboxRepositorySuite) TestFetchAndLockToPublishing_MultipleWorkersNoCo
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: fmt.Sprintf("concurrent-test-%d", i),
-			MaxRetries:     3,
+			MaxAttempts:     3,
 		})
 		s.Require().NoError(err)
 	}
@@ -911,7 +911,7 @@ func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_MultipleWorkersNo
 			EventType:      "test.event",
 			Payload:        s.createPayload(map[string]interface{}{"index": i}),
 			IdempotencyKey: fmt.Sprintf("batch-concurrent-test-%d", i),
-			MaxRetries:     3,
+			MaxAttempts:     3,
 		})
 		s.Require().NoError(err)
 	}
@@ -990,7 +990,7 @@ func (s *OutboxRepositorySuite) TestInsertOutboxJSON_MarshalStructAsPayload() {
 	assert.NotNil(s.T(), msg)
 	assert.Equal(s.T(), "order.created", msg.EventType)
 	assert.Equal(s.T(), "test-json-key", msg.IdempotencyKey)
-	assert.Equal(s.T(), 5, msg.MaxRetries)
+	assert.Equal(s.T(), 5, msg.MaxAttempts)
 	assert.JSONEq(s.T(), `{"order_id":"order-123","amount":1000}`, string(msg.Payload))
 }
 

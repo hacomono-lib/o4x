@@ -553,7 +553,7 @@ func TestService_Hooks_OnMessageDead(t *testing.T) {
 	}
 
 	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
-	cfg.MaxRetries = 2
+	cfg.MaxAttempts = 2
 	cfg.Hooks = hooks
 
 	service := consumer.NewService(mockClient, mockHandler, cfg)
@@ -653,8 +653,8 @@ func TestDefaultServiceConfig(t *testing.T) {
 	if standardConfig.WaitTimeSeconds != 20 {
 		t.Errorf("expected WaitTimeSeconds=20, got %d", standardConfig.WaitTimeSeconds)
 	}
-	if standardConfig.MaxRetries != 5 {
-		t.Errorf("expected MaxRetries=5, got %d", standardConfig.MaxRetries)
+	if standardConfig.MaxAttempts != 5 {
+		t.Errorf("expected MaxRetries=5, got %d", standardConfig.MaxAttempts)
 	}
 	if standardConfig.Logger == nil {
 		t.Error("expected Logger to be non-nil")
@@ -675,7 +675,7 @@ func TestService_NewService_AllValidations(t *testing.T) {
 		WorkerCount:        1,
 		MessageConcurrency: 10,
 		WaitTimeSeconds:    20,
-		MaxRetries:         5,
+		MaxAttempts:         5,
 	}
 
 	service := consumer.NewService(mockClient, mockHandler, cfg)
@@ -747,7 +747,7 @@ func TestService_Hooks_OnMessageDead_Panic(t *testing.T) {
 	}
 
 	cfg := consumer.DefaultServiceConfig("https://sqs.us-east-1.amazonaws.com/123456789012/test")
-	cfg.MaxRetries = 2
+	cfg.MaxAttempts = 2
 	cfg.Hooks = hooks
 
 	service := consumer.NewService(mockClient, mockHandler, cfg)

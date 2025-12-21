@@ -269,7 +269,7 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_HandlesPartialBatchFailure() 
 
 func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadAfterMaxRetries() {
 	// Arrange
-	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 3, 3)
 	s.repo.AddMessage(msg)
 
 	s.publisher.PublishBatchFunc = func(ctx context.Context, batch []*Outbox) []PublishResult {
@@ -307,6 +307,7 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadAfterMaxRetri
 	// Assert
 	updatedMsg := s.repo.GetMessage(msg.ID)
 	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status)
+	assert.Equal(s.T(), updatedMsg.MaxAttempts, updatedMsg.AttemptCount, "attempt_count should equal max_attempts when DEAD")
 }
 
 func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnPermanentError() {
@@ -541,8 +542,8 @@ func TestCallOnPartialBatchSuccess(t *testing.T) {
 			Payload:        []byte(`{}`),
 			IdempotencyKey: id,
 			Status:         OutboxStatusEnqueued,
-			RetryCount:     0,
-			MaxRetries:     5,
+			AttemptCount:     0,
+			MaxAttempts:     5,
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		}

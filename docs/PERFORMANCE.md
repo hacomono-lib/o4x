@@ -297,13 +297,13 @@ FROM outbox
 GROUP BY status;
 
 -- Check stuck messages
-SELECT id, event_type, status, retry_count, created_at, updated_at, error_message
+SELECT id, event_type, status, attempt_count, created_at, updated_at, error_message
 FROM outbox
 WHERE status = 'PUBLISHING' AND updated_at < NOW() - INTERVAL '5 minutes'
 LIMIT 10;
 
 -- Check failed messages
-SELECT id, event_type, retry_count, max_retries, next_retry_at, error_message
+SELECT id, event_type, attempt_count, max_attempts, next_retry_at, error_message
 FROM outbox
 WHERE status = 'FAILED'
 ORDER BY created_at DESC
@@ -500,19 +500,19 @@ poolConfig.BeforeConnect = func(ctx context.Context, config *pgx.ConnConfig) err
 **Possible causes**:
 1. RequeueInterval = 0 (automatic retry disabled)
 2. next_retry_at far in the future
-3. retry_count >= max_retries
+3. attempt_count >= max_attempts
 
 **Solution**:
 ```sql
 -- Check next_retry_at
-SELECT id, retry_count, max_retries, next_retry_at, NOW() as current_time
+SELECT id, attempt_count, max_attempts, next_retry_at, NOW() as current_time
 FROM outbox
 WHERE status = 'FAILED'
 LIMIT 10;
 
 -- Reset retry count if needed
 UPDATE outbox
-SET retry_count = 0, next_retry_at = NOW()
+SET attempt_count = 0, next_retry_at = NOW()
 WHERE status = 'FAILED' AND id = 'problematic-id';
 ```
 

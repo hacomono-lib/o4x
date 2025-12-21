@@ -93,7 +93,7 @@ stateDiagram-v2
     ENQUEUED --> PUBLISHING: Worker picks up
     PUBLISHING --> PUBLISHED: Success
     PUBLISHING --> FAILED: Error
-    FAILED --> ENQUEUED: Retry (retry_count < max_retries)
+    FAILED --> ENQUEUED: Retry (attempt_count < max_attempts)
     FAILED --> DEAD: Max retries exceeded
     PUBLISHED --> [*]
     DEAD --> [*]
@@ -107,7 +107,7 @@ stateDiagram-v2
 - **Oversized message**: 300KB payload exceeds SQS 256KB limit → immediately DEAD (PermanentError)
 
 **Operational actions:**
-- **FAILED**: Usually auto-recovers via RequeueFailed. Check `error_message` for network/auth issues. Reset retry count if needed: `UPDATE outbox SET retry_count = 0 WHERE id = '...'`
+- **FAILED**: Usually auto-recovers via RequeueFailed. Check `error_message` for network/auth issues. Reset retry count if needed: `UPDATE outbox SET attempt_count = 0 WHERE id = '...'`
 - **DEAD**: Alert immediately. Query cause: `SELECT id, event_type, error_message, payload FROM outbox WHERE status = 'DEAD'`. Options: (1) Fix payload and re-enqueue, (2) Manual publish to SQS, (3) Archive/delete if invalid.
 
 ### 2. Consumer (SQS-specific, Optional)
@@ -170,7 +170,7 @@ if _, err := repo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
     EventType:      "user.created",
     Payload:        json.RawMessage(`{"user_id": "123"}`),
     IdempotencyKey: "user-123-created",
-    MaxRetries:     10,
+    MaxAttempts:     10,
 }); err != nil {
     return err
 }
@@ -255,7 +255,7 @@ handler := consumer.HandlerFunc(func(ctx context.Context, msg *consumer.SQSMessa
 svc := consumer.NewService(sqsClient, handler, consumer.ServiceConfig{
     QueueURL:    queueURL,
     WorkerCount: 4,
-    MaxRetries:  5,
+    MaxAttempts:  5,
 })
 
 if err := svc.Start(ctx); err != nil {
@@ -655,7 +655,7 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, config)
 | `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |
 | `ForceTimeout` | 60s | Hard limit before forceful exit |
 
-**Exponential backoff formula:** `RequeueBackoffBase * 2^retry_count`, capped at `RequeueBackoffMax`
+**Exponential backoff formula:** `RequeueBackoffBase * 2^attempt_count`, capped at `RequeueBackoffMax`
 
 ### Consumer Config
 
@@ -665,7 +665,7 @@ dispatcher := core.NewBatchDispatcher(repo, publisher, config)
 | `MaxNumberOfMessages` | 10 | Messages per poll |
 | `WaitTimeSeconds` | 20 | Long polling wait time |
 | `VisibilityTimeout` | 30 | SQS visibility timeout |
-| `MaxRetries` | 5 | Max processing attempts |
+| `MaxAttempts` | 5 | Max processing attempts |
 | `WorkerCount` | 1 | Number of concurrent workers |
 | `MessageConcurrency` | 1 | Messages processed concurrently per worker (>1 only for Standard queues) |
 | `ShutdownTimeout` | 30s | Time to wait for graceful shutdown |
