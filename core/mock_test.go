@@ -66,7 +66,7 @@ func (m *MockOutboxRepository) Insert(ctx context.Context, params OutboxInsertPa
 		Payload:        params.Payload,
 		IdempotencyKey: params.IdempotencyKey,
 		Status:         OutboxStatusEnqueued,
-		MaxRetries:     params.MaxRetries,
+		MaxAttempts:    params.MaxAttempts,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}
@@ -115,7 +115,7 @@ func (m *MockOutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg st
 	if msg, ok := m.messages[id]; ok {
 		msg.Status = OutboxStatusFailed
 		msg.ErrorMessage = &errMsg
-		msg.RetryCount++
+		msg.AttemptCount++
 		msg.UpdatedAt = time.Now()
 	}
 	return nil
@@ -145,7 +145,7 @@ func (m *MockOutboxRepository) RequeueFailed(ctx context.Context) (int64, error)
 	}
 	var count int64
 	for _, msg := range m.messages {
-		if msg.Status == OutboxStatusFailed && msg.RetryCount < msg.MaxRetries {
+		if msg.Status == OutboxStatusFailed && msg.AttemptCount < msg.MaxAttempts {
 			msg.Status = OutboxStatusEnqueued
 			msg.UpdatedAt = time.Now()
 			count++
@@ -195,7 +195,7 @@ func (m *MockOutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64
 		msg.Status = OutboxStatusFailed
 		errMsg := "revived from PUBLISHING (crash recovery)"
 		msg.ErrorMessage = &errMsg
-		msg.RetryCount++ // Increment to enforce max_retries limit
+		msg.AttemptCount++ // Increment to enforce max_attempts limit
 		msg.UpdatedAt = time.Now()
 		count++
 	}
@@ -314,15 +314,15 @@ func createTestOutbox(eventType string, payload interface{}) *Outbox {
 		Payload:        data,
 		IdempotencyKey: GenerateID(),
 		Status:         OutboxStatusEnqueued,
-		MaxRetries:     3,
+		MaxAttempts:    3,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}
 }
 
-func createTestOutboxWithRetry(eventType string, payload interface{}, retryCount, maxRetries int) *Outbox {
+func createTestOutboxWithRetry(eventType string, payload interface{}, attemptCount, maxAttempts int) *Outbox {
 	msg := createTestOutbox(eventType, payload)
-	msg.RetryCount = retryCount
-	msg.MaxRetries = maxRetries
+	msg.AttemptCount = attemptCount
+	msg.MaxAttempts = maxAttempts
 	return msg
 }

@@ -165,8 +165,8 @@ func (w *Worker) handlePublishFailure(ctx context.Context, msg *Outbox, publishE
 	defer cancel()
 
 	// Check if retry limit will be exceeded after this failure OR error is not retryable
-	// Note: retry_count is incremented by UpdateToFailed
-	if !retryable || msg.RetryCount+1 >= msg.MaxRetries {
+	// Note: attempt_count is incremented by UpdateToFailed
+	if !retryable || msg.AttemptCount >= msg.MaxAttempts {
 		// Mark as DEAD
 		reason := "max retries exceeded"
 		if !retryable {
@@ -175,8 +175,8 @@ func (w *Worker) handlePublishFailure(ctx context.Context, msg *Outbox, publishE
 		logger.WarnContext(cleanupCtx, "message marked as DEAD",
 			"error", errMsg,
 			"reason", reason,
-			"retry_count", msg.RetryCount+1,
-			"max_retries", msg.MaxRetries,
+			"attempt_count", msg.AttemptCount,
+			"max_attempts", msg.MaxAttempts,
 			"retryable", retryable,
 		)
 		if err := w.repo.UpdateToDead(cleanupCtx, msg.ID, errMsg); err != nil {
@@ -197,8 +197,8 @@ func (w *Worker) handlePublishFailure(ctx context.Context, msg *Outbox, publishE
 	// Mark as FAILED (retryable)
 	logger.WarnContext(cleanupCtx, "message marked as FAILED",
 		"error", errMsg,
-		"retry_count", msg.RetryCount+1,
-		"max_retries", msg.MaxRetries,
+		"attempt_count", msg.AttemptCount+1,
+		"max_attempts", msg.MaxAttempts,
 	)
 	if err := w.repo.UpdateToFailed(cleanupCtx, msg.ID, errMsg); err != nil {
 		// If the message is already in a valid state (not PUBLISHING), log warning but don't fail

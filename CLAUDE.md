@@ -122,7 +122,7 @@ repo.WithTx(tx).Insert(ctx, core.OutboxInsertParams{
     EventType: "order.created",
     Payload: payload,
     IdempotencyKey: "order-123",
-    MaxRetries: 10,
+    MaxAttempts: 10,
 }) // Outbox in same tx
 tx.Commit(ctx)
 ```
@@ -182,7 +182,7 @@ inboxRepo := pgx.NewInboxRepository(pool)
 
 **Outbox Table** (Publisher side):
 - `id` (UUID v7), `event_type`, `payload` (JSONB), `metadata` (JSONB), `idempotency_key`
-- `status` (ENUM), `error_message`, `retry_count`, `max_retries`
+- `status` (ENUM), `error_message`, `attempt_count`, `max_attempts`
 - `next_retry_at` (TIMESTAMPTZ), `created_at`, `updated_at`
 - Indexes: `idx_outbox_status_created_at`, `idx_outbox_status_next_retry_at`
 
@@ -441,7 +441,7 @@ WorkerCount: 10, MessageConcurrency: 10 // 100 concurrent messages
 ### Startup Recovery
 
 Call once at startup:
-- `OutboxRepository.ReviveStuckPublishing()` - PUBLISHING → FAILED (increments retry_count)
+- `OutboxRepository.ReviveStuckPublishing()` - PUBLISHING → FAILED (increments attempt_count)
 
 Consumer side:
 - No manual recovery needed
@@ -477,7 +477,7 @@ status.IsStale(5 * time.Minute)  // no messages processed in 5min
 
 **BatchDispatcher Configuration**:
 - RequeueInterval: Default 10s (0 = no auto-retry)
-- Exponential backoff: `baseInterval * 2^retry_count`, capped at maxInterval
+- Exponential backoff: `baseInterval * 2^attempt_count`, capped at maxInterval
 
 **Graceful Shutdown**: Context cancellation respected, 10s timeout for DB cleanup.
 

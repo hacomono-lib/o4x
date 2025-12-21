@@ -29,8 +29,8 @@ CREATE TABLE %s (
   idempotency_key  TEXT NOT NULL,
   status           %s NOT NULL DEFAULT 'ENQUEUED',
   error_message    TEXT,
-  retry_count      INT NOT NULL DEFAULT 0,
-  max_retries      INT NOT NULL DEFAULT 10,
+  attempt_count    INT NOT NULL DEFAULT 1,
+  max_attempts     INT NOT NULL DEFAULT 10,
   next_retry_at    TIMESTAMPTZ,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -44,8 +44,8 @@ COMMENT ON COLUMN %s.metadata IS 'Optional metadata (trace context, custom heade
 COMMENT ON COLUMN %s.idempotency_key IS 'Unique key per event_type to prevent duplicate insertions';
 COMMENT ON COLUMN %s.status IS 'Current message state in the outbox pattern';
 COMMENT ON COLUMN %s.error_message IS 'Last error message (truncated to 4000 bytes, sanitized)';
-COMMENT ON COLUMN %s.retry_count IS 'Number of failed publish attempts';
-COMMENT ON COLUMN %s.max_retries IS 'Maximum retries before marking as DEAD';
+COMMENT ON COLUMN %s.attempt_count IS 'Current attempt number (1-based: 1 = first attempt, 10 = tenth attempt)';
+COMMENT ON COLUMN %s.max_attempts IS 'Maximum number of publish attempts before marking as DEAD';
 COMMENT ON COLUMN %s.next_retry_at IS 'Scheduled time for next retry attempt (with exponential backoff)';
 COMMENT ON COLUMN %s.created_at IS 'Timestamp when message was inserted into outbox';
 COMMENT ON COLUMN %s.updated_at IS 'Timestamp of last status change';
@@ -57,9 +57,9 @@ CREATE INDEX idx_%s_status_created_at
 -- Index for efficient RequeueFailed with next_retry_at
 -- Note: This partial index covers the WHERE clause of RequeueFailed query:
 --   WHERE status = 'FAILED' AND next_retry_at IS NOT NULL AND next_retry_at <= now()
--- The retry_count column is not included to keep index size small, as most FAILED
--- messages have retry_count < max_retries. If you have many FAILED messages near
--- max_retries, consider adding retry_count to this index.
+-- The attempt_count column is not included to keep index size small, as most FAILED
+-- messages have attempt_count < max_attempts. If you have many FAILED messages near
+-- max_attempts, consider adding attempt_count to this index.
 CREATE INDEX idx_%s_status_next_retry_at
   ON %s (status, next_retry_at)
   WHERE status = 'FAILED' AND next_retry_at IS NOT NULL;

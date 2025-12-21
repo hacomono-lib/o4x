@@ -272,7 +272,7 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan() {
 	}
 
 	// Manually update completed_at to simulate old messages
-	result := s.db.Exec("UPDATE " + s.tableName + " SET completed_at = NOW() - INTERVAL '10 days' WHERE consumer_name = ?", consumerName)
+	result := s.db.Exec("UPDATE "+s.tableName+" SET completed_at = NOW() - INTERVAL '10 days' WHERE consumer_name = ?", consumerName)
 	s.Require().NoError(result.Error)
 
 	// Act: Delete messages older than 7 days

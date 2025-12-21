@@ -209,7 +209,7 @@ func main() {
 		MaxNumberOfMessages: 10,
 		WaitTimeSeconds:     20,
 		VisibilityTimeout:   30,
-		MaxRetries:          5,
+		MaxAttempts:         5,
 		WorkerCount:         *workerCount,
 		MessageConcurrency:  *messageConcurrency,
 		Logger:              logger,

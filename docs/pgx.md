@@ -97,7 +97,7 @@ func CreateOrder(ctx context.Context, pool *pgxpool.Pool, order Order) error {
         EventType:      "order.created",
         Payload:        payload,
         IdempotencyKey: fmt.Sprintf("order-%s", order.ID),
-        MaxRetries:     10,
+        MaxAttempts:     10,
     })
     if err != nil {
         return err
@@ -120,7 +120,7 @@ repo.Insert(ctx, core.OutboxInsertParams{
     EventType:      "user.created",
     Payload:        json.RawMessage(`{"user_id": "123"}`),
     IdempotencyKey: "user-123-created",
-    MaxRetries:     10,
+    MaxAttempts:     10,
 })
 
 // Insert with JSON marshaling
@@ -253,7 +253,7 @@ CREATE INDEX idx_outbox_idempotency ON outbox(event_type, idempotency_key);
 ## Best Practices
 
 1. **Always use transactions** - Use `WithTx()` to ensure atomicity with your business logic
-2. **Set appropriate MaxRetries** - Based on your use case (typically 5-10)
+2. **Set appropriate MaxAttempts** - Based on your use case (typically 5-10)
 3. **Use meaningful idempotency keys** - Make them unique per event (e.g., `order-{id}-created`)
 4. **Tune connection pool** - Based on your dispatcher worker count and load
 5. **Create indexes** - Especially on `(status, created_at)` for fast polling
@@ -274,7 +274,7 @@ func PublishUserEvent(ctx context.Context, tx pgx.Tx, userID string, eventType s
         EventType:      fmt.Sprintf("user.%s", eventType),
         Payload:        json.RawMessage(`{"user_id": "` + userID + `"}`),
         IdempotencyKey: idempotencyKey,
-        MaxRetries:     10,
+        MaxAttempts:     10,
     })
     return err
 }
@@ -285,7 +285,7 @@ func PublishUserEvent(ctx context.Context, tx pgx.Tx, userID string, eventType s
 ```go
 // Check if message should be marked as DEAD
 msg, _ := repo.GetByID(ctx, id)
-if msg.RetryCount >= msg.MaxRetries {
+if msg.AttemptCount >= msg.MaxAttempts {
     repo.UpdateToDead(ctx, id, "max retries exceeded")
 } else {
     repo.UpdateToFailed(ctx, id, "temporary error")

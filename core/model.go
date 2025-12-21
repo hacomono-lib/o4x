@@ -33,8 +33,8 @@ type Outbox struct {
 	IdempotencyKey string          `json:"idempotency_key"`
 	Status         OutboxStatus    `json:"status"`
 	ErrorMessage   *string         `json:"error_message,omitempty"`
-	RetryCount     int             `json:"retry_count"`
-	MaxRetries     int             `json:"max_retries"`
+	AttemptCount   int             `json:"attempt_count"`
+	MaxAttempts    int             `json:"max_attempts"`
 	NextRetryAt    *time.Time      `json:"next_retry_at,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
@@ -46,17 +46,17 @@ type OutboxInsertParams struct {
 	Payload        json.RawMessage
 	Metadata       json.RawMessage // Optional metadata (trace_id, span_id, custom headers, etc.)
 	IdempotencyKey string
-	MaxRetries     int
+	MaxAttempts    int
 }
 
 // CanRetry returns true if the outbox message can be retried
 func (o *Outbox) CanRetry() bool {
-	return o.RetryCount < o.MaxRetries
+	return o.AttemptCount < o.MaxAttempts
 }
 
 // ShouldMarkDead returns true if the message should be marked as DEAD
 func (o *Outbox) ShouldMarkDead() bool {
-	return o.RetryCount >= o.MaxRetries
+	return o.AttemptCount >= o.MaxAttempts
 }
 
 // GenerateID generates a new UUID v7 for outbox messages
@@ -66,16 +66,16 @@ func GenerateID() string {
 }
 
 // CalculateNextRetryAt calculates the next retry time with exponential backoff and jitter.
-// Formula: now + (baseInterval * 2^retry_count * jitter), capped at maxInterval.
+// Formula: now + (baseInterval * 2^attempt_count * jitter), capped at maxInterval.
 // Jitter is a random value between 0.5 and 1.0 to prevent thundering herd problem.
 // This is used by UpdateToFailed to pre-calculate next_retry_at.
 //
 // Note: This Go implementation is provided for reference and testing.
 // The actual production implementation uses PostgreSQL's random() function
 // for atomicity and to avoid race conditions.
-func CalculateNextRetryAt(now time.Time, retryCount int, baseInterval, maxInterval time.Duration, jitter float64) time.Time {
-	// Exponential backoff: 2^retry_count
-	multiplier := 1 << uint(retryCount) // bit shift for power of 2
+func CalculateNextRetryAt(now time.Time, attemptCount int, baseInterval, maxInterval time.Duration, jitter float64) time.Time {
+	// Exponential backoff: 2^attempt_count
+	multiplier := 1 << uint(attemptCount) // bit shift for power of 2
 	backoff := baseInterval * time.Duration(multiplier)
 
 	// Cap at maxInterval before applying jitter

@@ -25,7 +25,7 @@ type ServiceConfig struct {
 	MaxNumberOfMessages int32
 	WaitTimeSeconds     int32
 	VisibilityTimeout   int32
-	MaxRetries          int
+	MaxAttempts         int
 	WorkerCount         int
 	// MessageConcurrency controls how many messages are processed concurrently
 	// within a single worker goroutine.
@@ -66,7 +66,7 @@ func DefaultServiceConfig(queueURL string) ServiceConfig {
 		MaxNumberOfMessages: 10,
 		WaitTimeSeconds:     20,
 		VisibilityTimeout:   30,
-		MaxRetries:          5,
+		MaxAttempts:         5,
 		WorkerCount:         1,
 		MessageConcurrency:  1, // Sequential processing by default
 		ShutdownTimeout:     30 * time.Second,
@@ -114,8 +114,8 @@ func NewService(sqsClient SQSClient, handler Handler, config ServiceConfig) *Ser
 	if config.VisibilityTimeout == 0 {
 		config.VisibilityTimeout = 30
 	}
-	if config.MaxRetries == 0 {
-		config.MaxRetries = 5
+	if config.MaxAttempts == 0 {
+		config.MaxAttempts = 5
 	}
 	if config.WorkerCount == 0 {
 		config.WorkerCount = 1
@@ -400,11 +400,11 @@ func (s *Service) handleFailure(ctx context.Context, msg *SQSMessage, handleErr 
 	errMsg := core.TruncateErrorMessage(handleErr.Error())
 
 	// Check if max retries exceeded
-	if msg.ReceiveCount >= s.config.MaxRetries {
+	if msg.ReceiveCount >= s.config.MaxAttempts {
 		logger.WarnContext(ctx, "max retries exceeded, deleting message",
 			"error", errMsg,
 			"receive_count", msg.ReceiveCount,
-			"max_retries", s.config.MaxRetries,
+			"max_attempts", s.config.MaxAttempts,
 		)
 		// Hook: OnMessageDead
 		s.config.Hooks.callOnMessageDead(ctx, msg, handleErr)
@@ -424,7 +424,7 @@ func (s *Service) handleFailure(ctx context.Context, msg *SQSMessage, handleErr 
 	logger.WarnContext(ctx, "message processing failed, will retry",
 		"error", errMsg,
 		"receive_count", msg.ReceiveCount,
-		"max_retries", s.config.MaxRetries,
+		"max_attempts", s.config.MaxAttempts,
 	)
 }
 
