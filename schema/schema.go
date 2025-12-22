@@ -50,9 +50,18 @@ COMMENT ON COLUMN %s.next_retry_at IS 'Scheduled time for next retry attempt (wi
 COMMENT ON COLUMN %s.created_at IS 'Timestamp when message was inserted into outbox';
 COMMENT ON COLUMN %s.updated_at IS 'Timestamp of last status change';
 
--- Index for efficient polling by dispatcher
+-- Index for efficient polling by dispatcher (general purpose, supports all statuses)
 CREATE INDEX idx_%s_status_created_at
   ON %s (status, created_at);
+
+-- Partial index optimized for Dispatcher polling (ENQUEUED messages only)
+-- This minimal index covers only ENQUEUED rows, reducing index size and improving
+-- cache efficiency for high-throughput polling with SKIP LOCKED.
+-- The composite index above remains necessary for queries on other statuses (FAILED, DEAD)
+-- used by operational tools.
+CREATE INDEX idx_%s_enqueued_created_at
+  ON %s (created_at)
+  WHERE status = 'ENQUEUED';
 
 -- Index for efficient RequeueFailed with next_retry_at
 -- Note: This partial index covers the WHERE clause of RequeueFailed query:
@@ -70,7 +79,7 @@ ALTER TABLE %s
     UNIQUE (event_type, idempotency_key);
 `, enumName, tableName, enumName,
 		tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName, // 12x for COMMENT statements
-		tableName, tableName, tableName, tableName, tableName, tableName) // 6x for indexes and constraints
+		tableName, tableName, tableName, tableName, tableName, tableName, tableName, tableName) // 8x for indexes and constraints
 }
 
 // DropOutboxDDL generates the DDL to drop the outbox table and its ENUM type.

@@ -45,9 +45,15 @@ func (s *SchemaSuite) TestOutboxDDL_GeneratesCorrectSchema() {
 	assert.Contains(s.T(), ddl, "created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()")
 	assert.Contains(s.T(), ddl, "updated_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()")
 
-	// Check index
+	// Check indexes
 	assert.Contains(s.T(), ddl, "CREATE INDEX idx_outbox_status_created_at")
 	assert.Contains(s.T(), ddl, "ON outbox (status, created_at)")
+	assert.Contains(s.T(), ddl, "CREATE INDEX idx_outbox_enqueued_created_at")
+	assert.Contains(s.T(), ddl, "ON outbox (created_at)")
+	assert.Contains(s.T(), ddl, "WHERE status = 'ENQUEUED'")
+	assert.Contains(s.T(), ddl, "CREATE INDEX idx_outbox_status_next_retry_at")
+	assert.Contains(s.T(), ddl, "ON outbox (status, next_retry_at)")
+	assert.Contains(s.T(), ddl, "WHERE status = 'FAILED' AND next_retry_at IS NOT NULL")
 
 	// Check unique constraint
 	assert.Contains(s.T(), ddl, "ADD CONSTRAINT uq_outbox_event_type_idempotency")
@@ -66,6 +72,8 @@ func (s *SchemaSuite) TestOutboxDDL_WithCustomTableName() {
 	assert.Contains(s.T(), ddl, "CREATE TABLE custom_outbox")
 	assert.Contains(s.T(), ddl, "status           custom_outbox_status NOT NULL")
 	assert.Contains(s.T(), ddl, "idx_custom_outbox_status_created_at")
+	assert.Contains(s.T(), ddl, "idx_custom_outbox_enqueued_created_at")
+	assert.Contains(s.T(), ddl, "idx_custom_outbox_status_next_retry_at")
 	assert.Contains(s.T(), ddl, "uq_custom_outbox_event_type_idempotency")
 }
 
