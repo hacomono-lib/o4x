@@ -317,6 +317,56 @@ func (s *InboxRepositorySuite) TestDeleteOlderThan_KeepsRecentMessages() {
 	assert.Equal(s.T(), int64(1), count, "Recent message should remain")
 }
 
+func (s *InboxRepositorySuite) TestDeleteOlderThan_SubSecondDuration() {
+	// Test for bug fix: sub-second durations should not be truncated to 0
+	// Previously, 50ms would become 0 seconds and delete all records
+	// Arrange
+	ctx := context.Background()
+	consumerName := "OrderHandler"
+
+	// Insert message
+	eventID := uuid.New()
+	processed, err := s.repo.IsProcessed(ctx, consumerName, eventID)
+	s.Require().NoError(err)
+	s.Require().False(processed)
+	s.repo.Complete(ctx, consumerName, eventID)
+
+	// Set completed_at to 1 second ago
+	_, err = s.pool.Exec(ctx, "UPDATE "+s.tableName+" SET completed_at = clock_timestamp() - INTERVAL '1 second' WHERE event_id = $1", eventID)
+	s.Require().NoError(err)
+
+	// Act: Delete messages older than 500ms
+	deleted, err := s.repo.DeleteOlderThan(ctx, 500*time.Millisecond)
+
+	// Assert: Message should be deleted (1s > 500ms)
+	assert.NoError(s.T(), err)
+	assert.Equal(s.T(), int64(1), deleted, "Should delete message older than 500ms")
+
+	// Insert another message
+	eventID2 := uuid.New()
+	processed2, err2 := s.repo.IsProcessed(ctx, consumerName, eventID2)
+	s.Require().NoError(err2)
+	s.Require().False(processed2)
+	s.repo.Complete(ctx, consumerName, eventID2)
+
+	// Set completed_at to 100ms ago
+	_, err = s.pool.Exec(ctx, "UPDATE "+s.tableName+" SET completed_at = clock_timestamp() - INTERVAL '100 milliseconds' WHERE event_id = $1", eventID2)
+	s.Require().NoError(err)
+
+	// Act: Delete messages older than 500ms
+	deleted2, err2 := s.repo.DeleteOlderThan(ctx, 500*time.Millisecond)
+
+	// Assert: Message should NOT be deleted (100ms < 500ms)
+	assert.NoError(s.T(), err2)
+	assert.Equal(s.T(), int64(0), deleted2, "Should NOT delete message younger than 500ms")
+
+	// Verify message still exists
+	var count int64
+	err = s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM "+s.tableName+" WHERE event_id = $1", eventID2).Scan(&count)
+	s.Require().NoError(err)
+	assert.Equal(s.T(), int64(1), count, "Recent message should remain")
+}
+
 func (s *InboxRepositorySuite) TestWithTx_RollbackPreventsInsertion() {
 	// Arrange
 	ctx := context.Background()
