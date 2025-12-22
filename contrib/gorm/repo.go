@@ -419,10 +419,11 @@ func (r *OutboxRepository) UpdateBatchToPublished(ctx context.Context, ids []str
 // DeleteOlderThan deletes outbox records with the given status older than the specified duration.
 // Implements core.OutboxCleaner
 func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, status core.OutboxStatus, olderThan time.Duration) (int64, error) {
-	// Convert Go duration to PostgreSQL interval format (e.g., "3600 seconds")
-	// This ensures timezone consistency by using PostgreSQL's NOW() function
+	// Convert Go duration to PostgreSQL interval format using microseconds
+	// to avoid truncation of sub-second durations (e.g., 50ms would become 0 seconds).
+	// This ensures timezone consistency by using PostgreSQL's clock_timestamp() function
 	// instead of Go's time.Now() which may use different timezone settings.
-	intervalStr := fmt.Sprintf("%d seconds", int64(olderThan.Seconds()))
+	intervalStr := fmt.Sprintf("%d microseconds", olderThan.Microseconds())
 
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).

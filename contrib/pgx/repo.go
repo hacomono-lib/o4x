@@ -545,8 +545,9 @@ func (r *OutboxRepository) UpdateBatchToPublished(ctx context.Context, ids []str
 func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, status core.OutboxStatus, olderThan time.Duration) (int64, error) {
 	query := fmt.Sprintf(queryDeleteOlderThan, r.tableName)
 
-	// Convert Go duration to PostgreSQL interval format (e.g., "3600 seconds")
-	intervalStr := fmt.Sprintf("%d seconds", int64(olderThan.Seconds()))
+	// Convert Go duration to PostgreSQL interval format using microseconds
+	// to avoid truncation of sub-second durations (e.g., 50ms would become 0 seconds)
+	intervalStr := fmt.Sprintf("%d microseconds", olderThan.Microseconds())
 
 	result, err := r.q.Exec(ctx, query, string(status), intervalStr)
 	if err != nil {

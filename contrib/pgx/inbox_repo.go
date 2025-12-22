@@ -219,8 +219,9 @@ func (r *InboxRepository) GetByEventID(ctx context.Context, consumerName string,
 func (r *InboxRepository) DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error) {
 	query := fmt.Sprintf(queryInboxDeleteOlderThan, r.tableName)
 
-	// Convert Go duration to PostgreSQL interval format
-	intervalStr := fmt.Sprintf("%d seconds", int64(olderThan.Seconds()))
+	// Convert Go duration to PostgreSQL interval format using microseconds
+	// to avoid truncation of sub-second durations (e.g., 50ms would become 0 seconds)
+	intervalStr := fmt.Sprintf("%d microseconds", olderThan.Microseconds())
 
 	var tag pgconn.CommandTag
 	var err error

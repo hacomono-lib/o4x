@@ -216,9 +216,10 @@ func (r *InboxRepository) GetByEventID(ctx context.Context, consumerName string,
 //	DELETE FROM consumer_inbox
 //	WHERE completed_at < NOW() - INTERVAL '7 days';
 func (r *InboxRepository) DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error) {
-	// Convert Go duration to PostgreSQL interval format
-	// This ensures timezone consistency by using PostgreSQL's NOW() function
-	intervalStr := fmt.Sprintf("%d seconds", int64(olderThan.Seconds()))
+	// Convert Go duration to PostgreSQL interval format using microseconds
+	// to avoid truncation of sub-second durations (e.g., 50ms would become 0 seconds).
+	// This ensures timezone consistency by using PostgreSQL's clock_timestamp() function.
+	intervalStr := fmt.Sprintf("%d microseconds", olderThan.Microseconds())
 
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
