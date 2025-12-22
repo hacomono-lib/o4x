@@ -34,7 +34,7 @@ const (
 			FOR UPDATE SKIP LOCKED
 		), updated AS (
 			UPDATE %s
-			SET status = 'PUBLISHING', updated_at = now()
+			SET status = 'PUBLISHING', updated_at = clock_timestamp()
 			FROM locked
 			WHERE %s.id = locked.id
 			RETURNING %s.id, %s.event_type, %s.payload, %s.metadata, %s.idempotency_key,
@@ -45,7 +45,7 @@ const (
 
 	queryUpdateToPublished = `
 		UPDATE %s
-		SET status = 'PUBLISHED', updated_at = now()
+		SET status = 'PUBLISHED', updated_at = clock_timestamp()
 		WHERE id = $1 AND status = 'PUBLISHING'`
 
 	queryUpdateToFailed = `
@@ -53,13 +53,13 @@ const (
 		SET status = 'FAILED',
 		    error_message = $2,
 		    attempt_count = attempt_count + 1,
-		    next_retry_at = now() + (
+		    next_retry_at = clock_timestamp() + (
 		        LEAST(
 		            ($3 * interval '1 second') * POWER(2, attempt_count),
 		            ($4 * interval '1 second')
 		        ) * (0.5 + random() * 0.5)
 		    ),
-		    updated_at = now()
+		    updated_at = clock_timestamp()
 		WHERE id = $1 AND status = 'PUBLISHING'`
 
 	queryUpdateToDead = `
@@ -67,16 +67,16 @@ const (
 		SET status = 'DEAD',
 		    error_message = $2,
 		    attempt_count = max_attempts,
-		    updated_at = now()
+		    updated_at = clock_timestamp()
 		WHERE id = $1 AND status = 'PUBLISHING'`
 
 	queryRequeueFailed = `
 		UPDATE %s
-		SET status = 'ENQUEUED', updated_at = now()
+		SET status = 'ENQUEUED', updated_at = clock_timestamp()
 		WHERE status = 'FAILED'
 		  AND attempt_count < max_attempts
 		  AND next_retry_at IS NOT NULL
-		  AND next_retry_at <= now()`
+		  AND next_retry_at <= clock_timestamp()`
 
 	queryGetByID = `
 		SELECT id, event_type, payload, metadata, idempotency_key, status, error_message,
@@ -95,15 +95,15 @@ const (
 		SET status = 'FAILED',
 		    error_message = 'revived from PUBLISHING (crash recovery)',
 		    attempt_count = attempt_count + 1,
-		    next_retry_at = now() + (
+		    next_retry_at = clock_timestamp() + (
 		        LEAST(
 		            ($1 * interval '1 second') * POWER(2, attempt_count),
 		            ($2 * interval '1 second')
 		        ) * (0.5 + random() * 0.5)
 		    ),
-		    updated_at = now()
+		    updated_at = clock_timestamp()
 		WHERE status = 'PUBLISHING'
-		  AND updated_at < now() - $3::interval`
+		  AND updated_at < clock_timestamp() - $3::interval`
 
 	queryFetchLockAndMarkPublishing = `
 		WITH locked AS (
@@ -115,7 +115,7 @@ const (
 			FOR UPDATE SKIP LOCKED
 		), updated AS (
 			UPDATE %s
-			SET status = 'PUBLISHING', updated_at = now()
+			SET status = 'PUBLISHING', updated_at = clock_timestamp()
 			FROM locked
 			WHERE %s.id = locked.id
 			RETURNING %s.id, %s.event_type, %s.payload, %s.metadata, %s.idempotency_key,
@@ -126,13 +126,13 @@ const (
 
 	queryUpdateBatchToPublished = `
 		UPDATE %s
-		SET status = 'PUBLISHED', updated_at = now()
+		SET status = 'PUBLISHED', updated_at = clock_timestamp()
 		WHERE id = ANY($1) AND status = 'PUBLISHING'`
 
 	queryDeleteOlderThan = `
 		DELETE FROM %s
 		WHERE status = $1
-		  AND updated_at < now() - $2::interval`
+		  AND updated_at < clock_timestamp() - $2::interval`
 )
 
 // querier is an interface that both pgxpool.Pool and pgx.Tx implement

@@ -24,7 +24,7 @@ const (
 
 	queryInboxComplete = `
 		INSERT INTO %s (consumer_name, event_id, completed_at)
-		VALUES ($1, $2, now())
+		VALUES ($1, $2, clock_timestamp())
 		ON CONFLICT (consumer_name, event_id) DO NOTHING`
 
 	queryInboxGetByEventID = `
@@ -34,7 +34,7 @@ const (
 
 	queryInboxDeleteOlderThan = `
 		DELETE FROM %s
-		WHERE completed_at < now() - $1::interval`
+		WHERE completed_at < clock_timestamp() - $1::interval`
 )
 
 // InboxRepository implements core.InboxRepository and core.InboxCleaner for pgx.

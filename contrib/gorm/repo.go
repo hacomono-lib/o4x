@@ -125,7 +125,7 @@ func (r *OutboxRepository) FetchAndLockToPublishing(ctx context.Context) (*core.
 			FOR UPDATE SKIP LOCKED
 		), updated AS (
 			UPDATE ` + r.tableName + `
-			SET status = 'PUBLISHING', updated_at = NOW()
+			SET status = 'PUBLISHING', updated_at = clock_timestamp()
 			FROM locked
 			WHERE ` + r.tableName + `.id = locked.id
 			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.event_type, ` + r.tableName + `.payload,
@@ -158,7 +158,7 @@ func (r *OutboxRepository) UpdateToPublished(ctx context.Context, id string) err
 		Where("id = ? AND status = ?", id, string(core.OutboxStatusPublishing)).
 		Updates(map[string]interface{}{
 			"status":     string(core.OutboxStatusPublished),
-			"updated_at": gorm.Expr("NOW()"),
+			"updated_at": gorm.Expr("clock_timestamp()"),
 		})
 	if result.Error != nil {
 		return result.Error
@@ -184,8 +184,8 @@ func (r *OutboxRepository) UpdateToFailed(ctx context.Context, id, errMsg string
 			"status":        string(core.OutboxStatusFailed),
 			"error_message": errMsg,
 			"attempt_count": gorm.Expr("attempt_count + 1"),
-			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, attempt_count), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
-			"updated_at":    gorm.Expr("NOW()"),
+			"next_retry_at": gorm.Expr("clock_timestamp() + (LEAST(? * interval '1 second' * POWER(2, attempt_count), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
+			"updated_at":    gorm.Expr("clock_timestamp()"),
 		})
 	if result.Error != nil {
 		return result.Error
@@ -206,7 +206,7 @@ func (r *OutboxRepository) UpdateToDead(ctx context.Context, id, errMsg string) 
 			"status":        string(core.OutboxStatusDead),
 			"error_message": errMsg,
 			"attempt_count": gorm.Expr("max_attempts"),
-			"updated_at":    gorm.Expr("NOW()"),
+			"updated_at":    gorm.Expr("clock_timestamp()"),
 		})
 	if result.Error != nil {
 		return result.Error
@@ -225,11 +225,11 @@ func (r *OutboxRepository) UpdateToDead(ctx context.Context, id, errMsg string) 
 func (r *OutboxRepository) RequeueFailed(ctx context.Context) (int64, error) {
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
-		Where("status = ? AND attempt_count < max_attempts AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()",
+		Where("status = ? AND attempt_count < max_attempts AND next_retry_at IS NOT NULL AND next_retry_at <= clock_timestamp()",
 			string(core.OutboxStatusFailed)).
 		Updates(map[string]interface{}{
 			"status":     string(core.OutboxStatusEnqueued),
-			"updated_at": gorm.Expr("NOW()"),
+			"updated_at": gorm.Expr("clock_timestamp()"),
 		})
 
 	if result.Error != nil {
@@ -324,8 +324,8 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 			"status":        string(core.OutboxStatusFailed),
 			"error_message": "revived from PUBLISHING (crash recovery)",
 			"attempt_count": gorm.Expr("attempt_count + 1"),
-			"next_retry_at": gorm.Expr("NOW() + (LEAST(? * interval '1 second' * POWER(2, attempt_count), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
-			"updated_at":    gorm.Expr("NOW()"),
+			"next_retry_at": gorm.Expr("clock_timestamp() + (LEAST(? * interval '1 second' * POWER(2, attempt_count), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
+			"updated_at":    gorm.Expr("clock_timestamp()"),
 		})
 	if result.Error != nil {
 		return 0, result.Error
@@ -367,7 +367,7 @@ func (r *OutboxRepository) FetchLockAndMarkPublishing(ctx context.Context, limit
 			FOR UPDATE SKIP LOCKED
 		), updated AS (
 			UPDATE ` + r.tableName + `
-			SET status = 'PUBLISHING', updated_at = NOW()
+			SET status = 'PUBLISHING', updated_at = clock_timestamp()
 			FROM locked
 			WHERE ` + r.tableName + `.id = locked.id
 			RETURNING ` + r.tableName + `.id, ` + r.tableName + `.event_type, ` + r.tableName + `.payload,
@@ -406,7 +406,7 @@ func (r *OutboxRepository) UpdateBatchToPublished(ctx context.Context, ids []str
 		Where("id IN ? AND status = ?", ids, string(core.OutboxStatusPublishing)).
 		Updates(map[string]interface{}{
 			"status":     string(core.OutboxStatusPublished),
-			"updated_at": gorm.Expr("NOW()"),
+			"updated_at": gorm.Expr("clock_timestamp()"),
 		})
 
 	if result.Error != nil {
@@ -426,7 +426,7 @@ func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, status core.Outb
 
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
-		Where("status = ? AND updated_at < NOW() - ?::interval", string(status), intervalStr).
+		Where("status = ? AND updated_at < clock_timestamp() - ?::interval", string(status), intervalStr).
 		Delete(&outboxModel{})
 
 	if result.Error != nil {

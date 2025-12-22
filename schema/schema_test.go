@@ -42,8 +42,8 @@ func (s *SchemaSuite) TestOutboxDDL_GeneratesCorrectSchema() {
 	assert.Contains(s.T(), ddl, "error_message    TEXT")
 	assert.Contains(s.T(), ddl, "attempt_count    INT NOT NULL DEFAULT 1")
 	assert.Contains(s.T(), ddl, "max_attempts     INT NOT NULL DEFAULT 10")
-	assert.Contains(s.T(), ddl, "created_at       TIMESTAMPTZ NOT NULL DEFAULT now()")
-	assert.Contains(s.T(), ddl, "updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()")
+	assert.Contains(s.T(), ddl, "created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()")
+	assert.Contains(s.T(), ddl, "updated_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()")
 
 	// Check index
 	assert.Contains(s.T(), ddl, "CREATE INDEX idx_outbox_status_created_at")
@@ -93,7 +93,7 @@ func (s *SchemaSuite) TestConsumerInboxDDL_GeneratesCorrectSchema() {
 	assert.Contains(s.T(), ddl, "CREATE TABLE consumer_inbox")
 	assert.Contains(s.T(), ddl, "consumer_name    TEXT NOT NULL")
 	assert.Contains(s.T(), ddl, "event_id         UUID NOT NULL")
-	assert.Contains(s.T(), ddl, "completed_at     TIMESTAMPTZ NOT NULL DEFAULT now()")
+	assert.Contains(s.T(), ddl, "completed_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()")
 	assert.Contains(s.T(), ddl, "PRIMARY KEY (consumer_name, event_id)")
 
 	// Check index for cleanup
