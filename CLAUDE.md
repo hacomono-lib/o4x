@@ -184,7 +184,10 @@ inboxRepo := pgx.NewInboxRepository(pool)
 - `id` (UUID v7), `event_type`, `payload` (JSONB), `metadata` (JSONB), `idempotency_key`
 - `status` (ENUM), `error_message`, `attempt_count`, `max_attempts`
 - `next_retry_at` (TIMESTAMPTZ), `created_at`, `updated_at`
-- Indexes: `idx_outbox_status_created_at`, `idx_outbox_status_next_retry_at`
+- Indexes:
+  - `idx_outbox_status_created_at` - Composite index for all status-based queries
+  - `idx_outbox_enqueued_created_at` - Partial index (ENQUEUED only) for Dispatcher polling optimization
+  - `idx_outbox_status_next_retry_at` - Partial index for RequeueFailed queries
 
 **Consumer Inbox Table** (Consumer side, **RECOMMENDED** for idempotency):
 - **Primary Key**: `(consumer_name, event_id)` - Ensures exactly-once processing

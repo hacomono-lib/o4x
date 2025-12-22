@@ -38,9 +38,18 @@ COMMENT ON COLUMN outbox.next_retry_at IS 'Scheduled time for next retry attempt
 COMMENT ON COLUMN outbox.created_at IS 'Timestamp when message was inserted into outbox';
 COMMENT ON COLUMN outbox.updated_at IS 'Timestamp of last status change';
 
--- Index for efficient polling by dispatcher
+-- Index for efficient polling by dispatcher (general purpose, supports all statuses)
 CREATE INDEX idx_outbox_status_created_at
   ON outbox (status, created_at);
+
+-- Partial index optimized for Dispatcher polling (ENQUEUED messages only)
+-- This minimal index covers only ENQUEUED rows, reducing index size and improving
+-- cache efficiency for high-throughput polling with SKIP LOCKED.
+-- The composite index above remains necessary for queries on other statuses (FAILED, DEAD)
+-- used by operational tools.
+CREATE INDEX idx_outbox_enqueued_created_at
+  ON outbox (created_at)
+  WHERE status = 'ENQUEUED';
 
 -- Index for efficient RequeueFailed with next_retry_at
 -- Note: This partial index covers the WHERE clause of RequeueFailed query:
