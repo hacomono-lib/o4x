@@ -20,8 +20,8 @@ CREATE TABLE outbox (
   attempt_count    INT NOT NULL DEFAULT 1,
   max_attempts     INT NOT NULL DEFAULT 10,
   next_retry_at    TIMESTAMPTZ,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 -- Column comments for outbox table
@@ -66,7 +66,7 @@ ALTER TABLE outbox
 CREATE TABLE consumer_inbox (
   consumer_name    TEXT NOT NULL,
   event_id         UUID NOT NULL,
-  completed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (consumer_name, event_id)
 );
 

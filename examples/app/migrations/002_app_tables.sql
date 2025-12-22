@@ -7,8 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) NOT NULL UNIQUE,
     name VARCHAR(255) NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'active',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE INDEX idx_users_email ON users(email);
@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS orders (
     quantity INTEGER NOT NULL,
     total_price INTEGER NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE INDEX idx_orders_user_id ON orders(user_id);
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS inventory (
     product_id VARCHAR(255) PRIMARY KEY,
     quantity INTEGER NOT NULL DEFAULT 0,
     reserved INTEGER NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT check_inventory_quantity CHECK (quantity >= 0),
     CONSTRAINT check_inventory_reserved CHECK (reserved >= 0),
     CONSTRAINT check_inventory_available CHECK (quantity >= reserved)
@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS notifications (
     subject TEXT NOT NULL,
     body TEXT NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE INDEX idx_notifications_status ON notifications(status);
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS order_confirmations (
     user_id UUID NOT NULL,
     product_id VARCHAR(255) NOT NULL,
     quantity INTEGER NOT NULL,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE INDEX idx_order_confirmations_order_id ON order_confirmations(order_id);
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS user_welcome_credits (
     event_id UUID PRIMARY KEY,
     user_id UUID NOT NULL,
     credit_amount INTEGER NOT NULL,
-    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE INDEX idx_user_welcome_credits_user_id ON user_welcome_credits(user_id);
@@ -86,11 +86,11 @@ CREATE INDEX idx_user_welcome_credits_granted_at ON user_welcome_credits(granted
 
 -- Seed some inventory data
 INSERT INTO inventory (product_id, quantity, reserved, updated_at) VALUES
-    ('product-001', 100, 0, NOW()),
-    ('product-002', 50, 0, NOW()),
-    ('product-003', 200, 0, NOW()),
-    ('product-004', 10, 0, NOW()),
-    ('product-005', 0, 0, NOW())
+    ('product-001', 100, 0, clock_timestamp()),
+    ('product-002', 50, 0, clock_timestamp()),
+    ('product-003', 200, 0, clock_timestamp()),
+    ('product-004', 10, 0, clock_timestamp()),
+    ('product-005', 0, 0, clock_timestamp())
 ON CONFLICT (product_id) DO NOTHING;
 
 -- Seed benchmark users (100 users for performance testing)
@@ -100,7 +100,7 @@ SELECT
     'bench-user-' || generate_series || '@example.com',
     'Benchmark User ' || generate_series,
     'active',
-    NOW(),
-    NOW()
+    clock_timestamp(),
+    clock_timestamp()
 FROM generate_series(1, 100)
 ON CONFLICT (email) DO NOTHING;

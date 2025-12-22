@@ -158,7 +158,7 @@ func (r *InboxRepository) IsProcessed(ctx context.Context, consumerName string, 
 func (r *InboxRepository) Complete(ctx context.Context, consumerName string, eventID uuid.UUID) error {
 	insertQuery := fmt.Sprintf(`
 		INSERT INTO %s (consumer_name, event_id, completed_at)
-		VALUES (?, ?, NOW())
+		VALUES (?, ?, clock_timestamp())
 		ON CONFLICT (consumer_name, event_id) DO NOTHING
 	`, r.tableName)
 
@@ -222,7 +222,7 @@ func (r *InboxRepository) DeleteOlderThan(ctx context.Context, olderThan time.Du
 
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
-		Where("completed_at < NOW() - ?::interval", intervalStr).
+		Where("completed_at < clock_timestamp() - ?::interval", intervalStr).
 		Delete(&consumerInboxModel{})
 
 	if result.Error != nil {
