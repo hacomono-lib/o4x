@@ -68,11 +68,14 @@ type BatchOutboxRepository interface {
 // OutboxCleaner provides methods to clean up old outbox records
 // Implement this interface to prevent table bloat from PUBLISHED/DEAD records
 type OutboxCleaner interface {
-	// DeleteOlderThan deletes outbox records with the given status
+	// DeleteOlderThan deletes outbox records with the given statuses
 	// that are older than the specified duration.
 	// Returns the number of deleted records.
-	// Typical usage: delete PUBLISHED records older than 7 days
-	DeleteOlderThan(ctx context.Context, status OutboxStatus, olderThan time.Duration) (int64, error)
+	// Can accept one or more statuses to delete multiple statuses in a single call.
+	// Typical usage:
+	//   - delete PUBLISHED records older than 7 days: DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished}, 7*24*time.Hour)
+	//   - delete both PUBLISHED and DEAD records: DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished, core.OutboxStatusDead}, 7*24*time.Hour)
+	DeleteOlderThan(ctx context.Context, statuses []OutboxStatus, olderThan time.Duration) (int64, error)
 }
 
 // OutboxRecovery provides methods to recover from crash states

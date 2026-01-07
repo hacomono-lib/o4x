@@ -131,7 +131,7 @@ const (
 
 	queryDeleteOlderThan = `
 		DELETE FROM %s
-		WHERE status = $1
+		WHERE status = ANY($1)
 		  AND updated_at < clock_timestamp() - $2::interval`
 )
 
@@ -540,16 +540,27 @@ func (r *OutboxRepository) UpdateBatchToPublished(ctx context.Context, ids []str
 	return result.RowsAffected(), nil
 }
 
-// DeleteOlderThan deletes outbox records with the given status older than the specified duration.
+// DeleteOlderThan deletes outbox records with the given statuses older than the specified duration.
 // Implements core.OutboxCleaner
-func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, status core.OutboxStatus, olderThan time.Duration) (int64, error) {
+// Can accept one or more statuses to delete multiple statuses in a single call.
+func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, statuses []core.OutboxStatus, olderThan time.Duration) (int64, error) {
+	if len(statuses) == 0 {
+		return 0, fmt.Errorf("at least one status must be specified")
+	}
+
 	query := fmt.Sprintf(queryDeleteOlderThan, r.tableName)
 
 	// Convert Go duration to PostgreSQL interval format using microseconds
 	// to avoid truncation of sub-second durations (e.g., 50ms would become 0 seconds)
 	intervalStr := fmt.Sprintf("%d microseconds", olderThan.Microseconds())
 
-	result, err := r.q.Exec(ctx, query, string(status), intervalStr)
+	// Convert statuses to []string for PostgreSQL ANY() operator
+	statusStrings := make([]string, len(statuses))
+	for i, status := range statuses {
+		statusStrings[i] = string(status)
+	}
+
+	result, err := r.q.Exec(ctx, query, statusStrings, intervalStr)
 	if err != nil {
 		return 0, err
 	}
