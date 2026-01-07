@@ -351,12 +351,16 @@ import "github.com/hacomono-lib/o4x/contrib/pgx"
 repo := pgx.NewOutboxRepository(pool)
 
 // Delete PUBLISHED messages older than 7 days
-count, err := repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 7 * 24 * time.Hour)
+count, err := repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished}, 7*24*time.Hour)
 log.Printf("Deleted %d PUBLISHED messages", count)
 
 // Delete DEAD messages older than 30 days
-count, err = repo.DeleteOlderThan(ctx, core.OutboxStatusDead, 30 * 24 * time.Hour)
+count, err = repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusDead}, 30*24*time.Hour)
 log.Printf("Deleted %d DEAD messages", count)
+
+// Or delete both PUBLISHED and DEAD messages in a single call
+count, err = repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished, core.OutboxStatusDead}, 7*24*time.Hour)
+log.Printf("Deleted %d messages", count)
 ```
 
 **Recommended schedule**:

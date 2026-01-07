@@ -146,7 +146,7 @@ msg, err := repo.GetByID(ctx, id)
 msg, err := repo.GetByIdempotencyKey(ctx, eventType, key)
 
 // Cleanup old messages
-count, err := repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 7*24*time.Hour)
+count, err := repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished}, 7*24*time.Hour)
 ```
 
 ### Batch Operations

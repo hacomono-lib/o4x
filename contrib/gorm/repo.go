@@ -416,18 +416,29 @@ func (r *OutboxRepository) UpdateBatchToPublished(ctx context.Context, ids []str
 	return result.RowsAffected, nil
 }
 
-// DeleteOlderThan deletes outbox records with the given status older than the specified duration.
+// DeleteOlderThan deletes outbox records with the given statuses older than the specified duration.
 // Implements core.OutboxCleaner
-func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, status core.OutboxStatus, olderThan time.Duration) (int64, error) {
+// Can accept one or more statuses to delete multiple statuses in a single call.
+func (r *OutboxRepository) DeleteOlderThan(ctx context.Context, statuses []core.OutboxStatus, olderThan time.Duration) (int64, error) {
+	if len(statuses) == 0 {
+		return 0, fmt.Errorf("at least one status must be specified")
+	}
+
 	// Convert Go duration to PostgreSQL interval format using microseconds
 	// to avoid truncation of sub-second durations (e.g., 50ms would become 0 seconds).
 	// This ensures timezone consistency by using PostgreSQL's clock_timestamp() function
 	// instead of Go's time.Now() which may use different timezone settings.
 	intervalStr := fmt.Sprintf("%d microseconds", olderThan.Microseconds())
 
+	// Convert statuses to []string for GORM IN clause
+	statusStrings := make([]string, len(statuses))
+	for i, status := range statuses {
+		statusStrings[i] = string(status)
+	}
+
 	result := r.db.WithContext(ctx).
 		Table(r.tableName).
-		Where("status = ? AND updated_at < clock_timestamp() - ?::interval", string(status), intervalStr).
+		Where("status IN ? AND updated_at < clock_timestamp() - ?::interval", statusStrings, intervalStr).
 		Delete(&outboxModel{})
 
 	if result.Error != nil {

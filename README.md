@@ -695,18 +695,25 @@ func CleanupOldMessages(ctx context.Context) error {
     repo := pgx.NewOutboxRepository(pool)
 
     // Delete PUBLISHED messages older than 7 days
-    publishedCount, err := repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 7*24*time.Hour)
+    publishedCount, err := repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished}, 7*24*time.Hour)
     if err != nil {
         return fmt.Errorf("failed to delete PUBLISHED messages: %w", err)
     }
     log.Printf("Deleted %d PUBLISHED messages", publishedCount)
 
     // Delete DEAD messages older than 30 days
-    deadCount, err := repo.DeleteOlderThan(ctx, core.OutboxStatusDead, 30*24*time.Hour)
+    deadCount, err := repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusDead}, 30*24*time.Hour)
     if err != nil {
         return fmt.Errorf("failed to delete DEAD messages: %w", err)
     }
     log.Printf("Deleted %d DEAD messages", deadCount)
+
+    // Or delete both PUBLISHED and DEAD messages in a single call
+    count, err := repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished, core.OutboxStatusDead}, 7*24*time.Hour)
+    if err != nil {
+        return fmt.Errorf("failed to delete messages: %w", err)
+    }
+    log.Printf("Deleted %d messages", count)
 
     return nil
 }

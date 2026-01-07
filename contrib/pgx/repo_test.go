@@ -510,7 +510,7 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_DeletesOldMessages() {
 	s.Require().NoError(err)
 
 	// Act
-	count, err := s.repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 24*time.Hour)
+	count, err := s.repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished}, 24*time.Hour)
 
 	// Assert
 	assert.NoError(s.T(), err)
@@ -581,12 +581,12 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_E2E_ComprehensiveScenarios()
 	}
 
 	// Act: Delete PUBLISHED messages older than 24 hours
-	countPublished, err := s.repo.DeleteOlderThan(ctx, core.OutboxStatusPublished, 24*time.Hour)
+	countPublished, err := s.repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished}, 24*time.Hour)
 	s.Require().NoError(err)
 	s.Assert().Equal(int64(1), countPublished, "Should delete exactly 1 PUBLISHED message (48h old)")
 
 	// Act: Delete DEAD messages older than 48 hours
-	countDead, err := s.repo.DeleteOlderThan(ctx, core.OutboxStatusDead, 48*time.Hour)
+	countDead, err := s.repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusDead}, 48*time.Hour)
 	s.Require().NoError(err)
 	s.Assert().Equal(int64(1), countDead, "Should delete exactly 1 DEAD message (72h old)")
 
@@ -609,6 +609,53 @@ func (s *OutboxRepositorySuite) TestDeleteOlderThan_E2E_ComprehensiveScenarios()
 		}
 		_ = eventType // avoid unused warning
 	}
+}
+
+func (s *OutboxRepositorySuite) TestDeleteOlderThan_MultipleStatuses() {
+	// Test that multiple statuses can be deleted in a single call
+	ctx := context.Background()
+
+	// Insert and publish a message
+	published, err := s.repo.Insert(ctx, core.OutboxInsertParams{
+		EventType:      "test.published",
+		Payload:        s.createPayload(map[string]interface{}{"key": "published"}),
+		IdempotencyKey: "test-published-multi",
+		MaxAttempts:    3,
+	})
+	s.Require().NoError(err)
+	_, err = s.pool.Exec(ctx, "UPDATE "+s.tableName+" SET status = 'PUBLISHING' WHERE id = $1", published.ID)
+	s.Require().NoError(err)
+	err = s.repo.UpdateToPublished(ctx, published.ID)
+	s.Require().NoError(err)
+
+	// Insert and mark as DEAD
+	dead, err := s.repo.Insert(ctx, core.OutboxInsertParams{
+		EventType:      "test.dead",
+		Payload:        s.createPayload(map[string]interface{}{"key": "dead"}),
+		IdempotencyKey: "test-dead-multi",
+		MaxAttempts:    3,
+	})
+	s.Require().NoError(err)
+	_, err = s.pool.Exec(ctx, "UPDATE "+s.tableName+" SET status = 'DEAD' WHERE id = $1", dead.ID)
+	s.Require().NoError(err)
+
+	// Set both to 2 days ago
+	_, err = s.pool.Exec(ctx, "UPDATE "+s.tableName+" SET updated_at = NOW() - INTERVAL '2 days' WHERE id IN ($1, $2)", published.ID, dead.ID)
+	s.Require().NoError(err)
+
+	// Act: Delete both PUBLISHED and DEAD messages older than 24 hours in a single call
+	count, err := s.repo.DeleteOlderThan(ctx, []core.OutboxStatus{core.OutboxStatusPublished, core.OutboxStatusDead}, 24*time.Hour)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	assert.Equal(s.T(), int64(2), count, "Should delete both PUBLISHED and DEAD messages")
+
+	// Verify both messages are deleted
+	_, err = s.repo.GetByID(ctx, published.ID)
+	assert.ErrorIs(s.T(), err, core.ErrNotFound, "Published message should be deleted")
+
+	_, err = s.repo.GetByID(ctx, dead.ID)
+	assert.ErrorIs(s.T(), err, core.ErrNotFound, "Dead message should be deleted")
 }
 
 func (s *OutboxRepositorySuite) TestWithTx_UsesTransactionForInsert() {
