@@ -66,7 +66,7 @@ const (
 		UPDATE %s
 		SET status = 'DEAD',
 		    error_message = $2,
-		    attempt_count = max_attempts,
+		    attempt_count = LEAST(attempt_count + 1, max_attempts),
 		    updated_at = clock_timestamp()
 		WHERE id = $1 AND status = 'PUBLISHING'`
 
@@ -92,17 +92,27 @@ const (
 
 	queryReviveStuckPublishing = `
 		UPDATE %s
-		SET status = 'FAILED',
-		    error_message = 'revived from PUBLISHING (crash recovery)',
-		    attempt_count = attempt_count + 1,
-		    next_retry_at = clock_timestamp() + (
-		        LEAST(
-		            ($1 * interval '1 second') * POWER(2, attempt_count),
-		            ($2 * interval '1 second')
-		        ) * (0.5 + random() * 0.5)
-		    ),
+		SET status = CASE 
+		        WHEN attempt_count + 1 >= max_attempts THEN 'DEAD'::outbox_status
+		        ELSE 'FAILED'::outbox_status
+		    END,
+		    error_message = CASE
+		        WHEN attempt_count + 1 >= max_attempts 
+		        THEN 'revived from PUBLISHING (crash recovery) - max attempts reached'
+		        ELSE 'revived from PUBLISHING (crash recovery)'
+		    END,
+		    attempt_count = LEAST(attempt_count + 1, max_attempts),
+		    next_retry_at = CASE
+		        WHEN attempt_count + 1 >= max_attempts THEN NULL
+		        ELSE clock_timestamp() + (
+		            LEAST(
+		                ($1 * interval '1 second') * POWER(2, attempt_count),
+		                ($2 * interval '1 second')
+		            ) * (0.5 + random() * 0.5)
+		        )
+		    END,
 		    updated_at = clock_timestamp()
-		WHERE status = 'PUBLISHING'
+		WHERE status = 'PUBLISHING'::outbox_status
 		  AND updated_at < clock_timestamp() - $3::interval`
 
 	queryFetchLockAndMarkPublishing = `
@@ -454,14 +464,14 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 
 // ReviveStuckPublishing recovers messages stuck in PUBLISHING state.
 // This should be called once at startup to recover from crashes.
-// PUBLISHING -> FAILED (will be retried by RequeueFailed)
+// PUBLISHING -> FAILED (will be retried by RequeueFailed) or DEAD (if max_attempts reached)
 //
 // Only revives messages that have been in PUBLISHING state for more than the configured
 // threshold (default: 5 minutes), preventing recovery of messages actively being processed.
 //
 // Note: attempt_count is incremented to ensure max_attempts limit is enforced.
-// This prevents infinite retries for messages that consistently fail.
-// Messages reaching max_attempts will be moved to DEAD on next retry attempt.
+// If incrementing would reach max_attempts, the message is marked as DEAD directly,
+// ensuring consistency with handlePublishFailure behavior.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	query := fmt.Sprintf(queryReviveStuckPublishing, r.tableName)
 	intervalStr := fmt.Sprintf("%d seconds", int64(r.stuckPublishingThreshold.Seconds()))

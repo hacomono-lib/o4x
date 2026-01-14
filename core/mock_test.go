@@ -131,6 +131,8 @@ func (m *MockOutboxRepository) UpdateToDead(ctx context.Context, id, errMsg stri
 	if msg, ok := m.messages[id]; ok {
 		msg.Status = OutboxStatusDead
 		msg.ErrorMessage = &errMsg
+		// Increment attempt_count but cap at max_attempts
+		msg.AttemptCount = min(msg.AttemptCount+1, msg.MaxAttempts)
 		msg.UpdatedAt = time.Now()
 	}
 	return nil

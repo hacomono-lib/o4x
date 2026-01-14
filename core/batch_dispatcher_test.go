@@ -350,6 +350,100 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnPermanentEr
 	// Assert
 	updatedMsg := s.repo.GetMessage(msg.ID)
 	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status)
+	// For permanent errors, attempt_count should reflect actual attempts (1), not max_attempts
+	assert.Equal(s.T(), 1, updatedMsg.AttemptCount, "attempt_count should be 1 for first-attempt permanent error")
+}
+
+func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnPermanentErrorAfterRetries() {
+	// Test permanent error occurring after some retries
+	// Arrange
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 5)
+	s.repo.AddMessage(msg)
+
+	s.publisher.PublishBatchFunc = func(ctx context.Context, batch []*Outbox) []PublishResult {
+		results := make([]PublishResult, len(batch))
+		for i, m := range batch {
+			results[i] = PublishResult{
+				OutboxID: m.ID,
+				Success:  false,
+				Error:    NewPermanentError(errors.New("validation failed")),
+			}
+		}
+		return results
+	}
+
+	config := BatchDispatcherConfig{
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		BatchSize:          10,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
+	}
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
+	ctx := context.Background()
+
+	// Act
+	err = dispatcher.Start(ctx)
+	assert.NoError(s.T(), err)
+
+	// Wait for message to be processed
+	time.Sleep(100 * time.Millisecond)
+	dispatcher.Stop()
+
+	// Assert
+	updatedMsg := s.repo.GetMessage(msg.ID)
+	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status)
+	// attempt_count should be 3 (2 + 1), not max_attempts (5)
+	assert.Equal(s.T(), 3, updatedMsg.AttemptCount, "attempt_count should reflect actual attempts")
+}
+
+func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnLastAttempt() {
+	// This is the edge case that was previously broken:
+	// When attempt_count = 2 and max_attempts = 3, the next failure should mark as DEAD
+	// (not FAILED with attempt_count = 3)
+	
+	// Arrange
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
+	s.repo.AddMessage(msg)
+
+	s.publisher.PublishBatchFunc = func(ctx context.Context, batch []*Outbox) []PublishResult {
+		results := make([]PublishResult, len(batch))
+		for i, m := range batch {
+			results[i] = PublishResult{
+				OutboxID: m.ID,
+				Success:  false,
+				Error:    errors.New("publish failed"),
+			}
+		}
+		return results
+	}
+
+	config := BatchDispatcherConfig{
+		Logger:             s.logger,
+		AutoRecover:        false,
+		PollInterval:       10 * time.Millisecond,
+		BatchSize:          10,
+		WorkerCount:        1,
+		DisableAutoRequeue: true,
+	}
+	dispatcher, err := NewBatchDispatcher(s.repo, s.publisher, config)
+	assert.NoError(s.T(), err)
+	ctx := context.Background()
+
+	// Act
+	err = dispatcher.Start(ctx)
+	assert.NoError(s.T(), err)
+
+	// Wait for message to be processed
+	time.Sleep(100 * time.Millisecond)
+	dispatcher.Stop()
+
+	// Assert
+	updatedMsg := s.repo.GetMessage(msg.ID)
+	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status, "message should be marked as DEAD on last attempt")
+	assert.Equal(s.T(), updatedMsg.MaxAttempts, updatedMsg.AttemptCount, "attempt_count should equal max_attempts when DEAD")
 }
 
 func (s *BatchDispatcherSuite) TestBatchDispatcher_CallsBatchHooks() {
