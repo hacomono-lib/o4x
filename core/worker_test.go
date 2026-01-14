@@ -164,7 +164,7 @@ func (s *WorkerSuite) TestWorker_MarksMessageDeadOnLastAttempt() {
 	// This is the edge case that was previously broken:
 	// When attempt_count = 2 and max_attempts = 3, the next failure should mark as DEAD
 	// (not FAILED with attempt_count = 3)
-	
+
 	// Arrange
 	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
 	s.repo.AddMessage(msg)
@@ -186,7 +186,6 @@ func (s *WorkerSuite) TestWorker_MarksMessageDeadOnLastAttempt() {
 	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status, "message should be marked as DEAD on last attempt")
 	assert.Equal(s.T(), updatedMsg.MaxAttempts, updatedMsg.AttemptCount, "attempt_count should equal max_attempts when DEAD")
 }
-
 
 func (s *WorkerSuite) TestWorker_CallsOnPublishStartHook() {
 	// Arrange

@@ -317,7 +317,7 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 // ensuring consistency with handlePublishFailure behavior.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	threshold := time.Now().Add(-r.stuckPublishingThreshold)
-	
+
 	query := fmt.Sprintf(`
 		UPDATE %s
 		SET status = CASE 
@@ -342,7 +342,7 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 		    updated_at = clock_timestamp()
 		WHERE status = ?::outbox_status AND updated_at < ?
 	`, r.tableName)
-	
+
 	result := r.db.WithContext(ctx).Exec(query,
 		string(core.OutboxStatusDead),
 		string(core.OutboxStatusFailed),
@@ -353,7 +353,7 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 		string(core.OutboxStatusPublishing),
 		threshold,
 	)
-	
+
 	if result.Error != nil {
 		return 0, result.Error
 	}

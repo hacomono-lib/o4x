@@ -445,8 +445,8 @@ func (s *OutboxRepositorySuite) TestReviveStuckPublishing_MarksAsDeadWhenMaxAtte
 
 	// Simulate message that has already failed twice (attempt_count = 2)
 	// Next increment would reach max_attempts (3)
-	_, err = s.pool.Exec(ctx, 
-		"UPDATE outbox SET attempt_count = 2, updated_at = NOW() - INTERVAL '10 minutes' WHERE id = $1", 
+	_, err = s.pool.Exec(ctx,
+		"UPDATE outbox SET attempt_count = 2, updated_at = NOW() - INTERVAL '10 minutes' WHERE id = $1",
 		msg.ID)
 	s.Require().NoError(err)
 
@@ -494,7 +494,7 @@ func (s *OutboxRepositorySuite) TestReviveStuckPublishing_HandlesMultipleMessage
 	s.Require().NoError(err)
 
 	// Simulate both stuck
-	_, err = s.pool.Exec(ctx, "UPDATE outbox SET updated_at = NOW() - INTERVAL '10 minutes' WHERE id IN ($1, $2)", 
+	_, err = s.pool.Exec(ctx, "UPDATE outbox SET updated_at = NOW() - INTERVAL '10 minutes' WHERE id IN ($1, $2)",
 		msg1.ID, msg2.ID)
 	s.Require().NoError(err)
 

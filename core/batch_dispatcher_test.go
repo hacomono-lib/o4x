@@ -403,7 +403,7 @@ func (s *BatchDispatcherSuite) TestBatchDispatcher_MarksMessageDeadOnLastAttempt
 	// This is the edge case that was previously broken:
 	// When attempt_count = 2 and max_attempts = 3, the next failure should mark as DEAD
 	// (not FAILED with attempt_count = 3)
-	
+
 	// Arrange
 	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
 	s.repo.AddMessage(msg)
