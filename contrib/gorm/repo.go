@@ -318,11 +318,14 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	threshold := time.Now().Add(-r.stuckPublishingThreshold)
 
+	// ENUM type name follows schema convention: {tableName}_status
+	enumName := r.tableName + "_status"
+
 	query := fmt.Sprintf(`
 		UPDATE %s
 		SET status = CASE 
-		        WHEN attempt_count + 1 >= max_attempts THEN ?::outbox_status
-		        ELSE ?::outbox_status
+		        WHEN attempt_count + 1 >= max_attempts THEN ?::%s
+		        ELSE ?::%s
 		    END,
 		    error_message = CASE
 		        WHEN attempt_count + 1 >= max_attempts 
@@ -340,8 +343,8 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 		        )
 		    END,
 		    updated_at = clock_timestamp()
-		WHERE status = ?::outbox_status AND updated_at < ?
-	`, r.tableName)
+		WHERE status = ?::%s AND updated_at < ?
+	`, r.tableName, enumName, enumName, enumName)
 
 	result := r.db.WithContext(ctx).Exec(query,
 		string(core.OutboxStatusDead),
