@@ -475,12 +475,12 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	// ENUM type name follows schema convention: {tableName}_status
 	enumName := r.tableName + "_status"
-	
-	query := fmt.Sprintf(queryReviveStuckPublishing, 
-		r.tableName,  // UPDATE table
-		enumName,     // DEAD cast
-		enumName,     // FAILED cast
-		enumName)     // PUBLISHING cast in WHERE
+
+	query := fmt.Sprintf(queryReviveStuckPublishing,
+		r.tableName, // UPDATE table
+		enumName,    // DEAD cast
+		enumName,    // FAILED cast
+		enumName)    // PUBLISHING cast in WHERE
 	intervalStr := fmt.Sprintf("%d seconds", int64(r.stuckPublishingThreshold.Seconds()))
 	result, err := r.q.Exec(ctx, query, r.backoffBase.Seconds(), r.backoffMax.Seconds(), intervalStr)
 	if err != nil {
