@@ -93,8 +93,8 @@ const (
 	queryReviveStuckPublishing = `
 		UPDATE %s
 		SET status = CASE 
-		        WHEN attempt_count + 1 >= max_attempts THEN 'DEAD'::outbox_status
-		        ELSE 'FAILED'::outbox_status
+		        WHEN attempt_count + 1 >= max_attempts THEN 'DEAD'::%s
+		        ELSE 'FAILED'::%s
 		    END,
 		    error_message = CASE
 		        WHEN attempt_count + 1 >= max_attempts 
@@ -112,7 +112,7 @@ const (
 		        )
 		    END,
 		    updated_at = clock_timestamp()
-		WHERE status = 'PUBLISHING'::outbox_status
+		WHERE status = 'PUBLISHING'::%s
 		  AND updated_at < clock_timestamp() - $3::interval`
 
 	queryFetchLockAndMarkPublishing = `
@@ -473,7 +473,14 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 // If incrementing would reach max_attempts, the message is marked as DEAD directly,
 // ensuring consistency with handlePublishFailure behavior.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
-	query := fmt.Sprintf(queryReviveStuckPublishing, r.tableName)
+	// ENUM type name follows schema convention: {tableName}_status
+	enumName := r.tableName + "_status"
+
+	query := fmt.Sprintf(queryReviveStuckPublishing,
+		r.tableName, // UPDATE table
+		enumName,    // DEAD cast
+		enumName,    // FAILED cast
+		enumName)    // PUBLISHING cast in WHERE
 	intervalStr := fmt.Sprintf("%d seconds", int64(r.stuckPublishingThreshold.Seconds()))
 	result, err := r.q.Exec(ctx, query, r.backoffBase.Seconds(), r.backoffMax.Seconds(), intervalStr)
 	if err != nil {
