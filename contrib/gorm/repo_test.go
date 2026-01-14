@@ -427,6 +427,99 @@ func (s *OutboxRepositorySuite) TestReviveStuckPublishing_MovesPublishingToFaile
 	assert.NotNil(s.T(), revivedMsg.NextRetryAt) // next_retry_at is set for exponential backoff
 }
 
+func (s *OutboxRepositorySuite) TestReviveStuckPublishing_MarksAsDeadWhenMaxAttemptsReached() {
+	// Test that messages reaching max_attempts during revival are marked as DEAD directly
+	// Arrange
+	ctx := context.Background()
+
+	// Insert and set to PUBLISHING using FetchAndLockToPublishing
+	inserted, err := s.repo.Insert(ctx, core.OutboxInsertParams{
+		EventType:      "test.event",
+		Payload:        s.createPayload(map[string]interface{}{"key": "value"}),
+		IdempotencyKey: "test-idem-key-revive-dead",
+		MaxAttempts:    3,
+	})
+	s.Require().NoError(err)
+
+	// Fetch and lock to make it PUBLISHING
+	msg, err := s.repo.FetchAndLockToPublishing(ctx)
+	s.Require().NoError(err)
+	s.Require().Equal(inserted.ID, msg.ID)
+
+	// Simulate message that has already failed twice (attempt_count = 2)
+	// Next increment would reach max_attempts (3)
+	err = s.db.Exec("UPDATE outbox SET attempt_count = 2, updated_at = NOW() - INTERVAL '10 minutes' WHERE id = ?",
+		msg.ID).Error
+	s.Require().NoError(err)
+
+	// Act
+	count, err := s.repo.ReviveStuckPublishing(ctx)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	assert.Equal(s.T(), int64(1), count)
+	revivedMsg, _ := s.repo.GetByID(ctx, inserted.ID)
+	assert.Equal(s.T(), core.OutboxStatusDead, revivedMsg.Status, "should be marked as DEAD when max_attempts reached")
+	assert.Equal(s.T(), 3, revivedMsg.AttemptCount, "attempt_count should be 3 (2+1)")
+	assert.NotNil(s.T(), revivedMsg.ErrorMessage)
+	assert.Equal(s.T(), "revived from PUBLISHING (crash recovery) - max attempts reached", *revivedMsg.ErrorMessage)
+	assert.Nil(s.T(), revivedMsg.NextRetryAt, "next_retry_at should be NULL for DEAD messages")
+}
+
+func (s *OutboxRepositorySuite) TestReviveStuckPublishing_HandlesMultipleMessagesCorrectly() {
+	// Test that revival handles both FAILED and DEAD cases in a single operation
+	// Arrange
+	ctx := context.Background()
+
+	// Message 1: Will become FAILED (attempt_count = 0 -> 1, max = 3)
+	msg1, err := s.repo.Insert(ctx, core.OutboxInsertParams{
+		EventType:      "test.event",
+		Payload:        s.createPayload(map[string]interface{}{"msg": "1"}),
+		IdempotencyKey: "test-revive-multi-1",
+		MaxAttempts:    3,
+	})
+	s.Require().NoError(err)
+	_, err = s.repo.FetchAndLockToPublishing(ctx)
+	s.Require().NoError(err)
+
+	// Message 2: Will become DEAD (attempt_count = 2 -> 3, max = 3)
+	msg2, err := s.repo.Insert(ctx, core.OutboxInsertParams{
+		EventType:      "test.event",
+		Payload:        s.createPayload(map[string]interface{}{"msg": "2"}),
+		IdempotencyKey: "test-revive-multi-2",
+		MaxAttempts:    3,
+	})
+	s.Require().NoError(err)
+	_, err = s.repo.FetchAndLockToPublishing(ctx)
+	s.Require().NoError(err)
+	err = s.db.Exec("UPDATE outbox SET attempt_count = 2 WHERE id = ?", msg2.ID).Error
+	s.Require().NoError(err)
+
+	// Simulate both stuck
+	err = s.db.Exec("UPDATE outbox SET updated_at = NOW() - INTERVAL '10 minutes' WHERE id IN (?, ?)",
+		msg1.ID, msg2.ID).Error
+	s.Require().NoError(err)
+
+	// Act
+	count, err := s.repo.ReviveStuckPublishing(ctx)
+
+	// Assert
+	assert.NoError(s.T(), err)
+	assert.Equal(s.T(), int64(2), count, "both messages should be revived")
+
+	// Check message 1 - should be FAILED
+	revivedMsg1, _ := s.repo.GetByID(ctx, msg1.ID)
+	assert.Equal(s.T(), core.OutboxStatusFailed, revivedMsg1.Status)
+	assert.Equal(s.T(), 2, revivedMsg1.AttemptCount, "attempt_count should be 2 (1 default + 1 from revive)")
+	assert.NotNil(s.T(), revivedMsg1.NextRetryAt)
+
+	// Check message 2 - should be DEAD
+	revivedMsg2, _ := s.repo.GetByID(ctx, msg2.ID)
+	assert.Equal(s.T(), core.OutboxStatusDead, revivedMsg2.Status)
+	assert.Equal(s.T(), 3, revivedMsg2.AttemptCount)
+	assert.Nil(s.T(), revivedMsg2.NextRetryAt)
+}
+
 func (s *OutboxRepositorySuite) TestFetchLockAndMarkPublishing_AtomicallyLocksAndUpdates() {
 	// Arrange
 	ctx := context.Background()

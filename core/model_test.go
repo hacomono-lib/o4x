@@ -97,6 +97,62 @@ func TestOutbox_ShouldMarkDead(t *testing.T) {
 	}
 }
 
+func TestOutbox_WillExceedMaxAttemptsAfterFailure(t *testing.T) {
+	tests := []struct {
+		name         string
+		attemptCount int
+		maxAttempts  int
+		expected     bool
+	}{
+		{
+			name:         "will exceed on last attempt (2 -> 3 with max 3)",
+			attemptCount: 2,
+			maxAttempts:  3,
+			expected:     true,
+		},
+		{
+			name:         "will exceed when already at max",
+			attemptCount: 3,
+			maxAttempts:  3,
+			expected:     true,
+		},
+		{
+			name:         "will exceed when over max",
+			attemptCount: 4,
+			maxAttempts:  3,
+			expected:     true,
+		},
+		{
+			name:         "will not exceed on first attempt (0 -> 1 with max 3)",
+			attemptCount: 0,
+			maxAttempts:  3,
+			expected:     false,
+		},
+		{
+			name:         "will not exceed on second attempt (1 -> 2 with max 3)",
+			attemptCount: 1,
+			maxAttempts:  3,
+			expected:     false,
+		},
+		{
+			name:         "will exceed immediately with max 1",
+			attemptCount: 0,
+			maxAttempts:  1,
+			expected:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outbox := &Outbox{
+				AttemptCount: tt.attemptCount,
+				MaxAttempts:  tt.maxAttempts,
+			}
+			assert.Equal(t, tt.expected, outbox.WillExceedMaxAttemptsAfterFailure())
+		})
+	}
+}
+
 // TestCalculateNextRetryAt tests the standalone CalculateNextRetryAt function
 func TestCalculateNextRetryAt(t *testing.T) {
 	baseInterval := 1 * time.Second

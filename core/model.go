@@ -50,13 +50,24 @@ type OutboxInsertParams struct {
 }
 
 // CanRetry returns true if the outbox message can be retried
+// This checks the CURRENT attempt count against max attempts.
+// Note: This is primarily for querying existing message state.
 func (o *Outbox) CanRetry() bool {
 	return o.AttemptCount < o.MaxAttempts
 }
 
 // ShouldMarkDead returns true if the message should be marked as DEAD
+// This checks if the CURRENT attempt count has reached or exceeded max attempts.
+// Note: This is primarily for querying existing message state.
 func (o *Outbox) ShouldMarkDead() bool {
 	return o.AttemptCount >= o.MaxAttempts
+}
+
+// WillExceedMaxAttemptsAfterFailure returns true if marking this message as FAILED
+// would result in attempt_count reaching max_attempts.
+// This is used in handlePublishFailure to decide between FAILED and DEAD.
+func (o *Outbox) WillExceedMaxAttemptsAfterFailure() bool {
+	return o.AttemptCount+1 >= o.MaxAttempts
 }
 
 // GenerateID generates a new UUID v7 for outbox messages

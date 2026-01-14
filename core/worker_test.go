@@ -131,6 +131,60 @@ func (s *WorkerSuite) TestWorker_MarksMessageDeadOnPermanentError() {
 	// Assert
 	updatedMsg := s.repo.GetMessage(msg.ID)
 	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status)
+	// For permanent errors, attempt_count should reflect actual attempts (1), not max_attempts
+	assert.Equal(s.T(), 1, updatedMsg.AttemptCount, "attempt_count should be 1 for first-attempt permanent error")
+}
+
+func (s *WorkerSuite) TestWorker_MarksMessageDeadOnPermanentErrorAfterRetries() {
+	// Test permanent error occurring after some retries
+	// Arrange
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 5)
+	s.repo.AddMessage(msg)
+
+	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
+		return NewPermanentError(errors.New("validation failed"))
+	}
+
+	worker := NewWorker(0, s.repo, s.publisher, s.logger, nil, 10*time.Millisecond, 100*time.Millisecond, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// Act
+	go worker.Run(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	// Assert
+	updatedMsg := s.repo.GetMessage(msg.ID)
+	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status)
+	// attempt_count should be 3 (2 + 1), not max_attempts (5)
+	assert.Equal(s.T(), 3, updatedMsg.AttemptCount, "attempt_count should reflect actual attempts")
+}
+
+func (s *WorkerSuite) TestWorker_MarksMessageDeadOnLastAttempt() {
+	// This is the edge case that was previously broken:
+	// When attempt_count = 2 and max_attempts = 3, the next failure should mark as DEAD
+	// (not FAILED with attempt_count = 3)
+
+	// Arrange
+	msg := createTestOutboxWithRetry("test.event", map[string]string{"key": "value"}, 2, 3)
+	s.repo.AddMessage(msg)
+
+	s.publisher.PublishFunc = func(ctx context.Context, m *Outbox) error {
+		return errors.New("publish failed")
+	}
+
+	worker := NewWorker(0, s.repo, s.publisher, s.logger, nil, 10*time.Millisecond, 100*time.Millisecond, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// Act
+	go worker.Run(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	// Assert
+	updatedMsg := s.repo.GetMessage(msg.ID)
+	assert.Equal(s.T(), OutboxStatusDead, updatedMsg.Status, "message should be marked as DEAD on last attempt")
+	assert.Equal(s.T(), updatedMsg.MaxAttempts, updatedMsg.AttemptCount, "attempt_count should equal max_attempts when DEAD")
 }
 
 func (s *WorkerSuite) TestWorker_CallsOnPublishStartHook() {

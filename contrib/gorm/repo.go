@@ -205,7 +205,7 @@ func (r *OutboxRepository) UpdateToDead(ctx context.Context, id, errMsg string) 
 		Updates(map[string]interface{}{
 			"status":        string(core.OutboxStatusDead),
 			"error_message": errMsg,
-			"attempt_count": gorm.Expr("max_attempts"),
+			"attempt_count": gorm.Expr("LEAST(attempt_count + 1, max_attempts)"),
 			"updated_at":    gorm.Expr("clock_timestamp()"),
 		})
 	if result.Error != nil {
@@ -307,26 +307,53 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 
 // ReviveStuckPublishing recovers messages stuck in PUBLISHING state.
 // This should be called once at startup to recover from crashes.
-// PUBLISHING -> FAILED (will be retried by RequeueFailed)
+// PUBLISHING -> FAILED (will be retried by RequeueFailed) or DEAD (if max_attempts reached)
 //
-// Only revives messages that have been in PUBLISHING state for more than 5 minutes,
-// preventing recovery of messages actively being processed.
+// Only revives messages that have been in PUBLISHING state for more than the configured
+// threshold (default: 5 minutes), preventing recovery of messages actively being processed.
 //
 // Note: attempt_count is incremented to ensure max_attempts limit is enforced.
-// This prevents infinite retries for messages that consistently fail.
-// Messages reaching max_attempts will be moved to DEAD on next retry attempt.
+// If incrementing would reach max_attempts, the message is marked as DEAD directly,
+// ensuring consistency with handlePublishFailure behavior.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
 	threshold := time.Now().Add(-r.stuckPublishingThreshold)
-	result := r.db.WithContext(ctx).
-		Table(r.tableName).
-		Where("status = ? AND updated_at < ?", string(core.OutboxStatusPublishing), threshold).
-		Updates(map[string]interface{}{
-			"status":        string(core.OutboxStatusFailed),
-			"error_message": "revived from PUBLISHING (crash recovery)",
-			"attempt_count": gorm.Expr("attempt_count + 1"),
-			"next_retry_at": gorm.Expr("clock_timestamp() + (LEAST(? * interval '1 second' * POWER(2, attempt_count), ? * interval '1 second') * (0.5 + random() * 0.5))", r.backoffBase.Seconds(), r.backoffMax.Seconds()),
-			"updated_at":    gorm.Expr("clock_timestamp()"),
-		})
+
+	query := fmt.Sprintf(`
+		UPDATE %s
+		SET status = CASE 
+		        WHEN attempt_count + 1 >= max_attempts THEN ?::outbox_status
+		        ELSE ?::outbox_status
+		    END,
+		    error_message = CASE
+		        WHEN attempt_count + 1 >= max_attempts 
+		        THEN ?
+		        ELSE ?
+		    END,
+		    attempt_count = LEAST(attempt_count + 1, max_attempts),
+		    next_retry_at = CASE
+		        WHEN attempt_count + 1 >= max_attempts THEN NULL
+		        ELSE clock_timestamp() + (
+		            LEAST(
+		                (? * interval '1 second') * POWER(2, attempt_count),
+		                (? * interval '1 second')
+		            ) * (0.5 + random() * 0.5)
+		        )
+		    END,
+		    updated_at = clock_timestamp()
+		WHERE status = ?::outbox_status AND updated_at < ?
+	`, r.tableName)
+
+	result := r.db.WithContext(ctx).Exec(query,
+		string(core.OutboxStatusDead),
+		string(core.OutboxStatusFailed),
+		"revived from PUBLISHING (crash recovery) - max attempts reached",
+		"revived from PUBLISHING (crash recovery)",
+		r.backoffBase.Seconds(),
+		r.backoffMax.Seconds(),
+		string(core.OutboxStatusPublishing),
+		threshold,
+	)
+
 	if result.Error != nil {
 		return 0, result.Error
 	}
