@@ -1,0 +1,5 @@
+[allowlist]
+description = "historical dummy api key example"
+regexes = [
+  "sk_live_abcd1234"
+]
