@@ -193,7 +193,7 @@ var sensitivePatterns = []*regexp.Regexp{
 //
 // Example:
 //
-//	"error: api_key=sk_live_abcd1234" → "error: api_key=***REDACTED***"
+//	"error: api_key=my_secret_value" → "error: api_key=***REDACTED***"
 func sanitizeSensitiveInfo(msg string) string {
 	result := msg
 	for _, pattern := range sensitivePatterns {
