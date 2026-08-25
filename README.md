@@ -38,6 +38,10 @@ o4x provides reliable message delivery from PostgreSQL to SQS using the [transac
 go get github.com/hacomono-lib/o4x
 ```
 
+### Requirements
+
+- Go 1.23 or later (tested on 1.23, 1.24, 1.25, 1.26, 1.27)
+
 ## Architecture
 
 o4x consists of two independent components:
