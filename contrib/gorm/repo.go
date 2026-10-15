@@ -316,7 +316,10 @@ func (r *OutboxRepository) InsertOutboxJSONWithMetadata(ctx context.Context, eve
 // If incrementing would reach max_attempts, the message is marked as DEAD directly,
 // ensuring consistency with handlePublishFailure behavior.
 func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, error) {
-	threshold := time.Now().Add(-r.stuckPublishingThreshold)
+	// Compare against PostgreSQL's clock_timestamp() instead of Go's time.Now(),
+	// because updated_at is written with clock_timestamp(). Mixing clocks would
+	// shift the effective threshold by any skew between the app and DB hosts.
+	intervalStr := fmt.Sprintf("%d seconds", int64(r.stuckPublishingThreshold.Seconds()))
 
 	// ENUM type name follows schema convention: {tableName}_status
 	enumName := r.tableName + "_status"
@@ -343,7 +346,7 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 		        )
 		    END,
 		    updated_at = clock_timestamp()
-		WHERE status = ?::%s AND updated_at < ?
+		WHERE status = ?::%s AND updated_at < clock_timestamp() - ?::interval
 	`, r.tableName, enumName, enumName, enumName)
 
 	result := r.db.WithContext(ctx).Exec(query,
@@ -354,7 +357,7 @@ func (r *OutboxRepository) ReviveStuckPublishing(ctx context.Context) (int64, er
 		r.backoffBase.Seconds(),
 		r.backoffMax.Seconds(),
 		string(core.OutboxStatusPublishing),
-		threshold,
+		intervalStr,
 	)
 
 	if result.Error != nil {
